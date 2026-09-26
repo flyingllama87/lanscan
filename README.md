@@ -39,3 +39,68 @@ Discovery is passive unless `--active` is specified. Passive runs also read reso
 JSONL contains all events; CSV/text stream findings as they change. `run_finished` carries coverage counts relative to known prefixes and planned candidates. Journal and output files are created exclusively and never silently overwritten. `--no-journal` opts out of recoverable local storage. `--sync every-event` requests stronger file durability at additional I/O cost. Progress and errors go to stderr. After an interrupt, the process drains for at most five seconds.
 
 Go 1.27 is the current build environment. Run `go test -race ./...` and `go vet ./...`. Unit tests exercise loopback echo/TCP only; they do not scan the host's LAN. `scripts/netns-lab.sh` builds a routed topology in unprivileged Linux user and network namespaces and runs the real binary end to end. Windows native tests run only on Windows (see `.github/workflows/ci.yml`); a cross-build does not validate native APIs at runtime.
+
+## Make targets
+
+Run `make` for help. `make build` creates `build/lanscan` (or
+`build/lanscan.exe` for Windows); `make test` runs the race-enabled test suite.
+Use `make install BINDIR="$HOME/.local/bin"` for a local installation.
+`make release` packages the selected platform, and `make release-all` builds
+Linux amd64/arm64/386 and Windows amd64/arm64 tarballs. Override `VERSION`,
+`BUILDDIR`, `GOOS`, or `GOARCH` as needed. Cross-building does not validate
+native networking at runtime.
+
+## Go package integration
+
+The root package exposes `DefaultConfig`, `Config`, `Discover`, `Event`, and
+`Result`. It uses the same discovery pipeline as the CLI, in-process. No signal
+handlers or process exits are installed, and the library defaults to no journal
+and no active network traffic.
+
+```go
+cfg := lanscan.DefaultConfig()
+cfg.Realm = "office"
+// To enable validation:
+// cfg.Active = true
+// cfg.Include = []string{"10.20.0.0/16"}
+// cfg.Seeds = "hosts.txt"
+
+result, err := lanscan.Discover(ctx, cfg, func(e lanscan.Event) error {
+    if e.Type == "finding_upsert" {
+        fmt.Printf("prefix=%v address=%s reachability=%s\n",
+            e.Prefix, e.Address, e.Reachability)
+    }
+    return nil
+})
+if err != nil && !errors.Is(err, lanscan.ErrPartial) {
+    return err
+}
+if result.Finished != nil {
+    fmt.Println(result.Finished.Details["coverage"])
+}
+```
+
+Start with `DefaultConfig()`; a zero `Config` is not valid. `Include` and
+`Exclude` are CIDR strings; `Seeds` and `Inventory` are file paths. Set
+`NoJournal = false` and `Journal` to enable recoverable storage. `Output` is
+CLI-only; library consumers handle their own output through the callback.
+
+Callbacks are serialized, receive independent snapshots, and may retain them.
+Numbers in `Event.Details` use `json.Number`. Return an error to stop discovery;
+the error is propagated. Callbacks must return promptly because context
+cancellation cannot interrupt consumer code. `Discover` returns context errors
+for caller cancellation and `ErrPartial` for incomplete runs. Findings already
+emitted remain usable; inspect `run_finished` for the stop reason, collector
+statuses, budgets, and coverage. Successful completion does not imply complete
+network coverage. Resume, export, and merge remain CLI commands.
+
+The current module name is `lanscan`. To integrate from another local module:
+
+```sh
+go mod edit -require=lanscan@v0.0.0
+go mod edit -replace=lanscan=/absolute/path/to/lanscan
+```
+
+Then import `"lanscan"` and run `go mod tidy`. Before publishing for remote
+`go get`, change the module path and internal imports to the repository's
+canonical hosting path. Linux and Windows are the supported platforms.

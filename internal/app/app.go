@@ -75,7 +75,8 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: lanscan discover [options] | resume --journal FILE | export [options] | merge [options] journals...\n\nDiscovery defaults to local-only collection. Use discover --help for options.")
 }
 
-type config struct {
+// Config configures a discovery run. Start with DefaultConfig.
+type Config struct {
 	Rate          float64       `json:"rate"`
 	Concurrency   int           `json:"concurrency"`
 	MaxOperations int           `json:"max_operations"`
@@ -84,8 +85,8 @@ type config struct {
 	Source        string        `json:"source"`
 	Active        bool          `json:"active"`
 	Plan          bool          `json:"plan"`
-	Include       stringsFlag   `json:"include"`
-	Exclude       stringsFlag   `json:"exclude"`
+	Include       []string      `json:"include"`
+	Exclude       []string      `json:"exclude"`
 	ScopeFrom     string        `json:"scope_from"`
 	Seeds         string        `json:"seeds"`
 	Inventory     string        `json:"inventory"`
@@ -100,10 +101,10 @@ type config struct {
 	Limit         int           `json:"candidate_limit"`
 	DiskBudget    int64         `json:"disk_budget"`
 	Duration      time.Duration `json:"duration"`
-	Require       stringsFlag   `json:"require_capability"`
+	Require       []string      `json:"require_capability"`
 	// Fields added after schema 1 omit zero values so earlier configuration
 	// hashes remain verifiable on resume.
-	DNSSuffix       stringsFlag   `json:"dns_suffix,omitempty"`
+	DNSSuffix       []string      `json:"dns_suffix,omitempty"`
 	Resolver        string        `json:"resolver,omitempty"`
 	DNSBudget       int           `json:"dns_budget,omitempty"`
 	Trace           int           `json:"trace,omitempty"`
@@ -112,6 +113,11 @@ type config struct {
 	SamplePerPrefix int           `json:"sample_per_prefix,omitempty"`
 	Refresh         time.Duration `json:"refresh_interval,omitempty"`
 }
+
+type config = Config
+
+// DefaultConfig returns the CLI defaults.
+func DefaultConfig() Config { return defaults() }
 
 func defaults() config {
 	return config{Rate: 20, Concurrency: 32, MaxOperations: 1000, Timeout: time.Second, Port: 443, Format: "text", Sync: "periodic", Limit: 100000, DiskBudget: 256 << 20, Duration: 2 * time.Minute, DNSBudget: 100, TraceHops: 16, TraceBudget: 48, Refresh: 5 * time.Second}
@@ -151,7 +157,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	// Repeated list flags replace the config list, then append in CLI order.
 	for _, entry := range []struct {
 		name  string
-		value *stringsFlag
+		value *[]string
 	}{{"include", &c.Include}, {"exclude", &c.Exclude}, {"require-capability", &c.Require}, {"dns-suffix", &c.DNSSuffix}} {
 		for _, arg := range args {
 			if arg == "--"+entry.name || strings.HasPrefix(arg, "--"+entry.name+"=") {
@@ -172,8 +178,8 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&configPath, "config", "", "JSON configuration file (duration in nanoseconds)")
 	fs.BoolVar(&c.Active, "active", c.Active, "enable explicitly scoped network validation")
 	fs.BoolVar(&c.Plan, "plan", c.Plan, "collect locally and show the bounded candidate plan; no probes")
-	fs.Var(&c.Include, "include", "allowed CIDR; repeatable")
-	fs.Var(&c.Exclude, "exclude", "excluded CIDR; repeatable, always wins")
+	fs.Var((*stringsFlag)(&c.Include), "include", "allowed CIDR; repeatable")
+	fs.Var((*stringsFlag)(&c.Exclude), "exclude", "excluded CIDR; repeatable, always wins")
 	fs.StringVar(&c.ScopeFrom, "scope-from", c.ScopeFrom, "routes: use explicit private unicast routes as scope")
 	fs.StringVar(&c.Seeds, "seeds", c.Seeds, "file with one IP or hostname per line")
 	fs.StringVar(&c.Inventory, "inventory", c.Inventory, "prefix inventory CSV")
@@ -188,8 +194,8 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&c.Limit, "candidate-limit", c.Limit, "maximum retained findings and candidates")
 	fs.Int64Var(&c.DiskBudget, "disk-budget", c.DiskBudget, "maximum journal bytes")
 	fs.DurationVar(&c.Duration, "duration", c.Duration, "maximum run duration")
-	fs.Var(&c.Require, "require-capability", "collector or capability that must be available; repeatable")
-	fs.Var(&c.DNSSuffix, "dns-suffix", "approved organisational DNS suffix; repeatable")
+	fs.Var((*stringsFlag)(&c.Require), "require-capability", "collector or capability that must be available; repeatable")
+	fs.Var((*stringsFlag)(&c.DNSSuffix), "dns-suffix", "approved organisational DNS suffix; repeatable")
 	fs.StringVar(&c.Resolver, "resolver", c.Resolver, "explicit DNS server IP (default: system resolver policy)")
 	fs.IntVar(&c.DNSBudget, "dns-budget", c.DNSBudget, "maximum DNS exchanges in active mode; 0 disables DNS")
 	fs.IntVar(&c.Trace, "trace", c.Trace, "trace up to N selected destinations; 0 disables")
@@ -268,7 +274,7 @@ type stream struct {
 	runtimeLease        time.Duration
 	cancel              context.CancelFunc
 	journal             *journal.Writer
-	renderer            *output.Renderer
+	renderer            interface{ Write(model.Event) error }
 	reducer             *discover.Reducer
 	statuses            map[string]string
 	routes              []model.Event
@@ -372,6 +378,32 @@ func runDiscover(parent context.Context, args []string, stdout, stderr io.Writer
 	if err != nil {
 		return 2, err
 	}
+	return discoverConfig(parent, c, stdout, stderr, nil)
+}
+
+// Discover runs the shared discovery pipeline with a typed event sink.
+func Discover(ctx context.Context, c Config, emit func(model.Event) error) (int, error) {
+	if emit == nil {
+		return 2, errors.New("event handler required")
+	}
+	if err := ctx.Err(); err != nil {
+		return 1, err
+	}
+	if c.Output != "" {
+		return 2, errors.New("Output is CLI-only; use the event handler to write results")
+	}
+	return discoverConfig(ctx, c, io.Discard, io.Discard, eventSink(emit))
+}
+
+type eventSink func(model.Event) error
+
+func (f eventSink) Write(e model.Event) error { return f(e) }
+
+func discoverConfig(parent context.Context, c config, stdout, stderr io.Writer, sink eventSink) (code int, retErr error) {
+	if err := validateConfig(c); err != nil {
+		return 2, err
+	}
+	var err error
 	_, err = discover.ParsePrefixes(c.Include)
 	if err != nil {
 		return 2, err
@@ -439,6 +471,9 @@ func runDiscover(parent context.Context, args []string, stdout, stderr io.Writer
 		fmt.Fprintln(stderr, "Journal:", c.Journal)
 	}
 	s := &stream{run: id, realm: c.Realm, vantage: c.Vantage, epoch: 1, journal: j, renderer: renderer, reducer: discover.NewReducer(c.Limit), statuses: make(map[string]string)}
+	if sink != nil {
+		s.renderer = sink
+	}
 	configHash, err := hashValue(c)
 	if err != nil {
 		return 1, err
