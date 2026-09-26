@@ -1,0 +1,47 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Fuzz (short)
+        run: |
+          go test -run XXX -fuzz FuzzReplay -fuzztime 20s ./internal/journal
+          go test -run XXX -fuzz FuzzImports -fuzztime 20s ./internal/importer
+          go test -run XXX -fuzz FuzzCacheParsers -fuzztime 20s ./internal/platform
+          go test -run XXX -fuzz FuzzICMPQuote -fuzztime 20s ./internal/probe
+          go test -run XXX -fuzz FuzzErrorQueue -fuzztime 20s ./internal/probe
+      - name: Namespace lab (routed topology, trace, TCP fallback, epochs)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          ./scripts/netns-lab.sh
+      - name: Cross-build
+        run: |
+          GOOS=linux GOARCH=arm64 go build ./cmd/lanscan
+          GOOS=windows GOARCH=arm64 go build ./cmd/lanscan
+
+  windows:
+    strategy:
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      # Hosted runners are elevated; standard-user coverage still needs a
+      # separate non-admin runner.
+      - run: go test -race ./...
+      - run: go build -o lanscan.exe ./cmd/lanscan
+      - run: ./lanscan.exe discover --no-journal --format text --require-capability routes --require-capability neighbors
