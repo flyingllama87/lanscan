@@ -14,7 +14,12 @@ import (
 // shutdownGrace bounds draining after an interrupt, even when a sink blocks.
 const shutdownGrace = 5 * time.Second
 
+var version = "development"
+
 func main() {
+	if version != "" {
+		app.Version = version
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	finished := make(chan struct{})
 	go func() {

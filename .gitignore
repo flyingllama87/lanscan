@@ -3,3 +3,5 @@
 /lanscan-*.jsonl
 /coverage.out
 /dist/
+build/
+lanscan-*.tar.gz

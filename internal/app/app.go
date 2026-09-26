@@ -32,6 +32,9 @@ type stringsFlag []string
 func (s *stringsFlag) String() string     { return strings.Join(*s, ",") }
 func (s *stringsFlag) Set(v string) error { *s = append(*s, v); return nil }
 
+// Version can be set at build time via -ldflags.
+var Version = "development"
+
 // Run returns an exit code without terminating the caller, allowing integration tests.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -53,7 +56,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		usage(stdout)
 		return 0
 	case "version", "--version":
-		fmt.Fprintln(stdout, "lanscan development (schema 1)")
+		fmt.Fprintf(stdout, "lanscan %s (schema 1)\n", Version)
 		return 0
 	default:
 		usage(stderr)
@@ -444,7 +447,7 @@ func runDiscover(parent context.Context, args []string, stdout, stderr io.Writer
 	if err != nil {
 		return 1, err
 	}
-	if err = s.emit(model.Event{Type: "run_started", ObservedAt: model.Now(), Details: map[string]any{"config": c, "config_hash": configHash, "input_hash": inputHash, "version": "development", "traffic_accounting": "application operations; no packet guarantee"}}); err != nil {
+	if err = s.emit(model.Event{Type: "run_started", ObservedAt: model.Now(), Details: map[string]any{"config": c, "config_hash": configHash, "input_hash": inputHash, "version": Version, "traffic_accounting": "application operations; no packet guarantee"}}); err != nil {
 		return 1, err
 	}
 	return execute(parent, c, s, seeds, inventory, 0, true)
