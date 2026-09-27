@@ -31,10 +31,20 @@ fi
 bin=$LANSCAN_BIN
 work=$LANSCAN_WORK
 pids=""
-cleanup() { for p in $pids; do kill "$p" 2>/dev/null || true; done; }
+# A backgrounded `at` is a subshell whose child is the helper; kill both.
+cleanup() { for p in $pids; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
-node() { unshare -n sleep 600 & pids="$pids $!"; eval "$1=$!"; }
+# node waits until the child is in its own namespace: until unshare(2) runs,
+# entering its namespace would configure this one instead.
+node() {
+	unshare -n sleep 600 & pids="$pids $!"; eval "$1=$!"
+	n=0
+	while [ "$(readlink "/proc/$!/ns/net")" = "$(readlink /proc/self/ns/net)" ]; do
+		n=$((n + 1)); [ "$n" -lt 500 ] || { echo "netns-lab: namespace for $1 never appeared" >&2; exit 1; }
+		sleep 0.01
+	done
+}
 at() { pid=$1; shift; nsenter -t "$pid" -n "$@"; }
 link() { ip link add "$1" type veth peer name "$2"; ip link set "$2" netns "$3"; }
 
