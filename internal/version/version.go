@@ -8,7 +8,7 @@ import (
 
 // Base is the release this source tree becomes. Bump it with each release,
 // before tagging v<Base>.
-const Base = "0.2.0"
+const Base = "0.2.1"
 
 // injected is set by release builds with
 // -ldflags '-X lanscan/internal/version.injected=VERSION'.
