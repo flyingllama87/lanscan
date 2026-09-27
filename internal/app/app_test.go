@@ -38,7 +38,7 @@ func TestPassiveDiscoveryJournalAndExport(t *testing.T) {
 	}
 	out.Reset()
 	stderr.Reset()
-	if code = Run(context.Background(), []string{"export", "--journal", path, "--format", "csv", "--view", "latest"}, &out, &stderr); code != 0 {
+	if code = Run(context.Background(), []string{"export", "--journal", path, "--format", "csv-findings", "--view", "latest"}, &out, &stderr); code != 0 {
 		t.Fatalf("%d: %s", code, stderr.String())
 	}
 	if !bytes.HasPrefix(out.Bytes(), []byte("schema_version,run_id,")) {

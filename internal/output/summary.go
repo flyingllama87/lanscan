@@ -1,10 +1,12 @@
 package output
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/netip"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -190,7 +192,11 @@ func (s *summary) observe(e model.Event) {
 	case "capability":
 		switch {
 		case e.Outcome == "unavailable" && (e.Source == "icmp4" || e.Source == "icmp6"):
-			s.note(fmt.Sprintf("%s echo unavailable (%s); used only a TCP connect to port %d", strings.ToUpper(e.Source[:4])+"v"+e.Source[4:], shorten(str(e.Details["error"])), s.cfg.Tuning.Port))
+			msg := fmt.Sprintf("%s echo unavailable (%s); used only a TCP connect to port %d", strings.ToUpper(e.Source[:4])+"v"+e.Source[4:], shorten(str(e.Details["error"])), s.cfg.Tuning.Port)
+			if runtime.GOOS == "linux" {
+				msg += `. To enable ICMP, run as root or once: sudo setcap cap_net_raw+ep "$(command -v lanscan)"`
+			}
+			s.note(msg)
 		case e.Outcome == "unavailable":
 			s.note(fmt.Sprintf("%s unavailable (%s)", clean(e.Source), shorten(str(e.Details["error"]))))
 		}
@@ -354,9 +360,11 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-func (s *summary) print() error {
+// prepare finishes the host list: hosts-file names, and neither this
+// host's addresses nor subnet broadcasts count as hosts.
+func (s *summary) prepare() bool {
 	if s.printed || !s.any {
-		return nil
+		return false
 	}
 	s.printed = true
 	for a, names := range s.named {
@@ -366,7 +374,6 @@ func (s *summary) print() error {
 			}
 		}
 	}
-	// Broadcast addresses of connected subnets are not hosts.
 	for a := range s.hosts {
 		if _, mine := s.own[a]; mine {
 			delete(s.hosts, a)
@@ -378,6 +385,13 @@ func (s *summary) print() error {
 			}
 		}
 	}
+	return true
+}
+
+func (s *summary) print() error {
+	if !s.prepare() {
+		return nil
+	}
 	b := &strings.Builder{}
 	s.header(b)
 	s.subnetTable(b)
@@ -388,6 +402,36 @@ func (s *summary) print() error {
 	s.footer(b)
 	_, err := io.WriteString(s.w, b.String())
 	return err
+}
+
+// csvHeader is the table form of the summary: one row per subnet, then one
+// per host.
+var csvHeader = []string{"kind", "subnet", "address", "name", "mac", "interface", "this_host", "gateway", "hosts", "responded", "known_from", "status"}
+
+func (s *summary) printCSV(raw bool) error {
+	if !s.prepare() {
+		return nil
+	}
+	w := csv.NewWriter(s.w)
+	rows := [][]string{csvHeader}
+	for _, r := range s.subnetRows() {
+		rows = append(rows, []string{"subnet", r.prefix.String(), "", "", "", r.iface, r.this, r.gateway, strconv.Itoa(r.hosts), strconv.Itoa(r.responded), r.from, ""})
+	}
+	for _, r := range s.hostRows() {
+		rows = append(rows, []string{"host", r.subnet, r.addr.String(), r.names, r.mac, r.iface, "", "", "", "", r.from, r.status})
+	}
+	for _, row := range rows {
+		if !raw {
+			for i := range row {
+				row[i] = safe(row[i])
+			}
+		}
+		if err := w.Write(row); err != nil {
+			return err
+		}
+	}
+	w.Flush()
+	return w.Error()
 }
 
 func (s *summary) header(b *strings.Builder) {
@@ -416,7 +460,14 @@ func (s *summary) header(b *strings.Builder) {
 	fmt.Fprintln(b, strings.Join(parts, " · "))
 }
 
-func (s *summary) subnetTable(b *strings.Builder) {
+type subnetRow struct {
+	prefix                     netip.Prefix
+	iface, this, gateway, from string
+	hosts, responded           int
+}
+
+// subnetRows orders subnets: this host's first, then routed, then others.
+func (s *summary) subnetRows() []subnetRow {
 	prefixes := make([]netip.Prefix, 0, len(s.subnets))
 	for p := range s.subnets {
 		prefixes = append(prefixes, p)
@@ -451,23 +502,8 @@ func (s *summary) subnetTable(b *strings.Builder) {
 			counts[p] = c
 		}
 	}
-	fmt.Fprintf(b, "\nSUBNETS (%d)\n", len(prefixes))
-	if len(prefixes) == 0 {
-		fmt.Fprintln(b, "  none found")
-		return
-	}
-	probing := s.cfg.Intensity > 0 && !s.cfg.Plan
-	t := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
-	hosts := "HOSTS"
-	if probing {
-		hosts = "HOSTS (RESPONDED)"
-	}
-	fmt.Fprintf(t, "  SUBNET\tINTERFACE\tTHIS HOST\tGATEWAY\t%s\tKNOWN FROM\n", hosts)
-	for i, p := range prefixes {
-		if i == maxRows {
-			fmt.Fprintf(t, "  … %d more (see -f csv or -f jsonl)\n", len(prefixes)-maxRows)
-			break
-		}
+	rows := make([]subnetRow, 0, len(prefixes))
+	for _, p := range prefixes {
 		n := s.subnets[p]
 		var mine []string
 		for a := range s.own {
@@ -487,16 +523,46 @@ func (s *summary) subnetTable(b *strings.Builder) {
 			}
 		}
 		c := counts[p]
-		count := fmt.Sprint(c[0])
-		if probing {
-			count = fmt.Sprintf("%d (%d)", c[0], c[1])
+		rows = append(rows, subnetRow{prefix: p, iface: n.iface, this: strings.Join(mine, ","), gateway: gw, from: strings.Join(sortedKeys(n.from), ", "), hosts: c[0], responded: c[1]})
+	}
+	return rows
+}
+
+func (s *summary) probing() bool { return s.cfg.Intensity > 0 && !s.cfg.Plan }
+
+func (s *summary) subnetTable(b *strings.Builder) {
+	rows := s.subnetRows()
+	fmt.Fprintf(b, "\nSUBNETS (%d)\n", len(rows))
+	if len(rows) == 0 {
+		fmt.Fprintln(b, "  none found")
+		return
+	}
+	t := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+	hosts := "HOSTS"
+	if s.probing() {
+		hosts = "HOSTS (RESPONDED)"
+	}
+	fmt.Fprintf(t, "  SUBNET\tINTERFACE\tTHIS HOST\tGATEWAY\t%s\tKNOWN FROM\n", hosts)
+	for i, r := range rows {
+		if i == maxRows {
+			fmt.Fprintf(t, "  … %d more (see -f csv)\n", len(rows)-maxRows)
+			break
 		}
-		fmt.Fprintf(t, "  %s\t%s\t%s\t%s\t%s\t%s\n", p, dash(n.iface), dash(strings.Join(mine, ",")), dash(gw), count, strings.Join(sortedKeys(n.from), ", "))
+		count := fmt.Sprint(r.hosts)
+		if s.probing() {
+			count = fmt.Sprintf("%d (%d)", r.hosts, r.responded)
+		}
+		fmt.Fprintf(t, "  %s\t%s\t%s\t%s\t%s\t%s\n", r.prefix, dash(r.iface), dash(r.this), dash(r.gateway), count, r.from)
 	}
 	t.Flush()
 }
 
-func (s *summary) hostTable(b *strings.Builder) {
+type hostRow struct {
+	addr                                    netip.Addr
+	subnet, iface, names, mac, from, status string
+}
+
+func (s *summary) hostRows() []hostRow {
 	addrs := make([]netip.Addr, 0, len(s.hosts))
 	for a := range s.hosts {
 		addrs = append(addrs, a)
@@ -507,36 +573,51 @@ func (s *summary) hostTable(b *strings.Builder) {
 		}
 		return addrs[i].Less(addrs[j])
 	})
-	fmt.Fprintf(b, "\nHOSTS (%d)\n", len(addrs))
-	if len(addrs) == 0 {
+	rows := make([]hostRow, 0, len(addrs))
+	for _, a := range addrs {
+		h := s.hosts[a]
+		r := hostRow{addr: a, names: strings.Join(sortedKeys(h.names), ","), mac: h.mac, from: strings.Join(sortedKeys(h.from), ", ")}
+		if p, ok := s.subnetOf(a); ok {
+			r.subnet, r.iface = p.String(), s.subnets[p].iface
+		}
+		if s.probing() {
+			switch {
+			case h.responded != "":
+				r.status = "responded " + h.responded
+			case h.probed:
+				r.status = "silent"
+			case h.router:
+				r.status = "router on a traced path"
+			default:
+				r.status = "not probed"
+			}
+		}
+		rows = append(rows, r)
+	}
+	return rows
+}
+
+func (s *summary) hostTable(b *strings.Builder) {
+	rows := s.hostRows()
+	fmt.Fprintf(b, "\nHOSTS (%d)\n", len(rows))
+	if len(rows) == 0 {
 		fmt.Fprintln(b, "  none found")
 		return
 	}
-	probing := s.cfg.Intensity > 0 && !s.cfg.Plan
 	t := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
 	status := ""
-	if probing {
+	if s.probing() {
 		status = "\tSTATUS"
 	}
 	fmt.Fprintf(t, "  ADDRESS\tNAME\tMAC\tKNOWN FROM%s\n", status)
-	for i, a := range addrs {
+	for i, r := range rows {
 		if i == maxRows {
-			fmt.Fprintf(t, "  … %d more (see -f csv or -f jsonl)\n", len(addrs)-maxRows)
+			fmt.Fprintf(t, "  … %d more (see -f csv)\n", len(rows)-maxRows)
 			break
 		}
-		h := s.hosts[a]
-		row := fmt.Sprintf("  %s\t%s\t%s\t%s", a, dash(strings.Join(sortedKeys(h.names), ",")), dash(h.mac), strings.Join(sortedKeys(h.from), ", "))
-		if probing {
-			switch {
-			case h.responded != "":
-				row += "\tresponded " + h.responded
-			case h.probed:
-				row += "\tsilent"
-			case h.router:
-				row += "\trouter on a traced path"
-			default:
-				row += "\tnot probed"
-			}
+		row := fmt.Sprintf("  %s\t%s\t%s\t%s", r.addr, dash(r.names), dash(r.mac), r.from)
+		if s.probing() {
+			row += "\t" + r.status
 		}
 		fmt.Fprintln(t, row)
 	}

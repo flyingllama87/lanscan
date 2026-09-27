@@ -17,7 +17,7 @@ import (
 
 func TestCSVStreamingAndFormulaNeutralization(t *testing.T) {
 	var b bytes.Buffer
-	r, err := New(&b, "csv", false)
+	r, err := New(&b, "csv-findings", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ type brokenWriter struct{}
 
 func (brokenWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 func TestOutputFailurePropagates(t *testing.T) {
-	for _, format := range []string{"jsonl", "csv", "text"} {
+	for _, format := range Formats {
 		r, err := New(brokenWriter{}, format, false)
 		if err == nil {
 			err = r.Write(model.Event{Type: "finding_upsert"})
@@ -201,7 +201,7 @@ func TestJSONLAndCSVFiltering(t *testing.T) {
 		t.Fatalf("%q %v", b.String(), err)
 	}
 	b.Reset()
-	r, err = New(&b, "csv", true)
+	r, err = New(&b, "csv-findings", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,5 +219,47 @@ func TestJSONLAndCSVFiltering(t *testing.T) {
 	}
 	if _, err := New(&b, "xml", false); err == nil {
 		t.Fatal("unknown format accepted")
+	}
+}
+
+func TestCSVSummaryTable(t *testing.T) {
+	events := activeRun()
+	events = append(events[:len(events)-1], model.Event{Type: "observation", Source: "dns_reverse", Address: "192.168.1.7", Name: "=HYPERLINK(1)"}, events[len(events)-1])
+	var b bytes.Buffer
+	r, err := New(&b, "csv", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if err := r.Write(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := csv.NewReader(strings.NewReader(b.String())).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(rows[0], ",") != "kind,subnet,address,name,mac,interface,this_host,gateway,hosts,responded,known_from,status" {
+		t.Fatal(rows[0])
+	}
+	want := map[string][]string{
+		"subnet 192.168.1.0/24": {"subnet", "192.168.1.0/24", "", "", "", "eth0", "192.168.1.50", "192.168.1.1", "2", "1", "interface", ""},
+		"host 192.168.1.7":      {"host", "192.168.1.0/24", "192.168.1.7", "'=HYPERLINK(1),printer", "aa:bb:cc:00:00:07", "eth0", "", "", "", "", "DNS, neighbour cache", "silent"},
+	}
+	found := 0
+	for _, row := range rows[1:] {
+		key := row[0] + " " + row[1]
+		if row[0] == "host" {
+			key = row[0] + " " + row[2]
+		}
+		if w, ok := want[key]; ok {
+			found++
+			if strings.Join(row, "|") != strings.Join(w, "|") {
+				t.Errorf("%s:\n got %q\nwant %q", key, row, w)
+			}
+		}
+	}
+	if found != len(want) {
+		t.Fatalf("rows %v", rows)
 	}
 }

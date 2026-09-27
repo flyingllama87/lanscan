@@ -14,7 +14,7 @@ lanscan --intensity 2 --seeds hosts.txt --plan
 # Bounded validation with a recoverable journal and streamed CSV view.
 lanscan --intensity 2 --include 10.20.0.0/16 --exclude 10.20.50.0/24 \
   --seeds hosts.txt --realm corporate --vantage brisbane --journal scan.jsonl \
-  --format csv --output findings.csv
+  --format csv --output hosts.csv
 
 # A preset with one advanced override and stronger journal durability.
 lanscan --intensity 3 --trace 0 --journal durable.jsonl --sync every-event
@@ -23,7 +23,7 @@ lanscan --intensity 3 --trace 0 --journal durable.jsonl --sync every-event
 lanscan resume --journal scan.jsonl
 
 # Offline materialization and combination: no discovery traffic.
-lanscan export --journal scan.jsonl --format csv --view latest
+lanscan export --journal scan.jsonl --format csv-findings --view latest
 lanscan merge office-a.jsonl office-b.jsonl --format jsonl
 ```
 

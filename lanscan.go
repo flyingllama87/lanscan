@@ -13,7 +13,8 @@ import (
 
 // Config controls discovery. Start with DefaultConfig, set Intensity (0 is
 // passive), and optionally override Tuning fields, e.g. starting from
-// Preset(cfg.Intensity). A zero Tuning uses the intensity's preset.
+// Preset(cfg.Intensity). A zero Tuning uses the intensity's preset, and a
+// zero Duration the intensity's default run limit (plus Listen).
 // Include/Exclude contain CIDRs; Seeds and Inventory are input file paths.
 // Output is CLI-only. Set Journal to a new file path for a recoverable journal.
 // Format controls journal configuration metadata; events are always typed.

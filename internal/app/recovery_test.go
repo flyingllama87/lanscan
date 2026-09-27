@@ -30,6 +30,7 @@ func partialRun(t *testing.T, active bool) (string, config) {
 	}
 	c.Include = []string{"192.0.2.0/24"}
 	c.MaxOperations = 1
+	c = c.resolved()
 	j, err := journal.Create(path, journal.Options{})
 	if err != nil {
 		t.Fatal(err)

@@ -260,7 +260,7 @@ type resumeOptions struct {
 func resumeFlags(o *resumeOptions) *flag.FlagSet {
 	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
 	fs.StringVar(&o.path, "journal", "", "journal `FILE` of the interrupted run")
-	fs.StringVar(&o.format, "format", "", "output format for this segment (default: the run's format)")
+	fs.StringVar(&o.format, "format", "", "output `FORMAT` for this segment: text, csv, jsonl or csv-findings (default: the run's)")
 	fs.StringVar(&o.output, "output", "", "write this segment to a new `FILE` instead of stdout")
 	fs.IntVar(&o.addOperations, "extend-operations", 0, "add `N` to the run's operation budget")
 	fs.DurationVar(&o.addDuration, "extend-duration", 0, "add this much to the run's time budget")
@@ -295,8 +295,8 @@ func runResume(parent context.Context, args []string, stdout, stderr io.Writer) 
 	if *addOperations < 0 || *addDuration < 0 || *diskBudget < 0 {
 		return 2, usageError{errors.New("extensions must be nonnegative")}
 	}
-	if *format != "" && *format != "jsonl" && *format != "csv" && *format != "text" {
-		return 2, usageError{errors.New("--format must be text, jsonl or csv")}
+	if *format != "" && !validFormat(*format) {
+		return 2, usageError{errors.New("--format must be text, csv, jsonl or csv-findings")}
 	}
 	state := newRecovery()
 	var updated config

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
 	"time"
 
 	"golang.org/x/net/bpf"
@@ -59,7 +61,7 @@ func Open(iface string) (*Capture, error) {
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
-			return nil, fmt.Errorf("packet capture needs CAP_NET_RAW (run as root or grant the capability): %w", err)
+			return nil, fmt.Errorf("packet capture needs CAP_NET_RAW: %w; run as root, or grant it once with: %s", err, GrantCommand())
 		}
 		return nil, fmt.Errorf("packet socket: %w", err)
 	}
@@ -153,6 +155,16 @@ func (c *Capture) Run(ctx context.Context, deadline time.Time, fn func(Frame) er
 
 // Close ends the capture and its all-multicast memberships.
 func (c *Capture) Close() error { return unix.Close(c.fd) }
+
+// GrantCommand is the one-off command that lets this binary capture packets
+// and send ICMP without root.
+func GrantCommand() string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "$(command -v lanscan)"
+	}
+	return "sudo setcap cap_net_raw+ep " + strconv.Quote(exe)
+}
 
 // Supported reports whether this platform can capture.
 const Supported = true

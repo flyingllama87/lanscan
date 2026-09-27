@@ -12,12 +12,14 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"lanscan/internal/importer"
 	"lanscan/internal/listen"
 	"lanscan/internal/model"
+	"lanscan/internal/output"
 	"lanscan/internal/version"
 )
 
@@ -182,13 +184,21 @@ type config = Config
 func DefaultConfig() Config { return defaults() }
 
 func defaults() config {
-	return config{Format: "text", Sync: "periodic", Limit: 100000, DiskBudget: 256 << 20, Duration: 2 * time.Minute}
+	return config{Format: "text", Sync: "periodic", Limit: 100000, DiskBudget: 256 << 20}
 }
 
-// resolved fills an unset Tuning from the intensity preset.
+// durations are the default run limits by intensity; listening time is
+// added on top. Runs end sooner when their work is done.
+var durations = [MaxIntensity + 1]time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute}
+
+// resolved fills an unset Tuning from the intensity preset and an unset
+// Duration from the intensity's default.
 func (c Config) resolved() Config {
 	if c.Tuning == (Tuning{}) {
 		c.Tuning = Preset(c.Intensity)
+	}
+	if c.Duration == 0 && c.Intensity >= 0 && c.Intensity <= MaxIntensity {
+		c.Duration = durations[c.Intensity] + c.Listen
 	}
 	return c
 }
@@ -202,7 +212,7 @@ func discoverFlags(c *config) *flag.FlagSet {
 	fs.DurationVar(&c.Listen, "listen", c.Listen, "first listen this long to broadcast/multicast traffic, e.g. 30s\n(Linux; needs root or CAP_NET_RAW; sends nothing)")
 	fs.BoolVar(&c.Plan, "plan", c.Plan, "show what the intensity would probe, then stop; sends nothing")
 	fs.BoolVar(&c.NoIPv6, "no-ipv6", c.NoIPv6, "no IPv6 probes, lookups or capture")
-	fs.DurationVar(&c.Duration, "duration", c.Duration, "stop after this long")
+	fs.DurationVar(&c.Duration, "duration", c.Duration, "stop after at most this long")
 	fs.Var((*stringsFlag)(&c.Include), "include", "probe only inside this `CIDR`; repeatable (default: private address space)")
 	fs.Var((*stringsFlag)(&c.Exclude), "exclude", "never probe inside this `CIDR`; repeatable, always wins")
 	fs.StringVar(&c.Interface, "interface", c.Interface, "use only this network `INTERFACE`")
@@ -213,7 +223,7 @@ func discoverFlags(c *config) *flag.FlagSet {
 	fs.Var((*stringsFlag)(&c.DNSSuffix), "dns-suffix", "only query names under this `DOMAIN`; repeatable")
 	fs.StringVar(&c.Resolver, "resolver", c.Resolver, "query this DNS server `IP` instead of the system resolver")
 	fs.String("config", "", "read settings from this JSON `FILE`; flags override it")
-	fs.StringVar(&c.Format, "format", c.Format, "results `FORMAT`: text, jsonl or csv")
+	fs.StringVar(&c.Format, "format", c.Format, "results `FORMAT`:\ntext          a readable summary\ncsv           subnets and hosts, one row each\njsonl         every event, streamed (for tools)\ncsv-findings  every finding revision, streamed (for tools)")
 	fs.StringVar(&c.Output, "output", c.Output, "write results to this new `FILE` instead of stdout")
 	fs.StringVar(&c.Journal, "journal", c.Journal, "also keep a recoverable event journal in this new `FILE` (needed for resume)")
 	fs.StringVar(&c.Sync, "sync", c.Sync, "journal durability `MODE`: periodic or every-event")
@@ -260,6 +270,7 @@ func tuningNotes() map[string]string {
 		notes[name] = fmt.Sprintf("intensity 1/2/3: %s/%s/%s", get(presets[1]), get(presets[2]), get(presets[3]))
 	}
 	notes["disk-budget"] = "default 256 MiB"
+	notes["duration"] = fmt.Sprintf("intensity 0/1/2/3: %s/%s/%s/%s, plus --listen; runs end sooner when done", minutes(durations[0]), minutes(durations[1]), minutes(durations[2]), minutes(durations[3]))
 	return notes
 }
 
@@ -277,7 +288,7 @@ traffic only when you raise --intensity. It never sweeps address ranges.`,
 		{"lanscan -i 1", "also confirm known addresses (a handful of packets)"},
 		{"lanscan -i 2 --listen 30s", "listen first, then sample known subnets"},
 		{"lanscan -i 3 --plan", "show what intensity 3 would probe; sends nothing"},
-		{"lanscan -i 2 -f csv -o hosts.csv", "write findings to a CSV file"},
+		{"lanscan -i 2 -f csv -o hosts.csv", "subnets and hosts as a spreadsheet"},
 		{"lanscan -i 2 --include 10.20.0.0/16", "probe only inside one range"},
 	},
 	template: []string{
@@ -293,7 +304,14 @@ traffic only when you raise --intensity. It never sweeps address ranges.`,
 		{"LIMITS", []string{"max-operations", "candidate-limit", "disk-budget", "require-capability"}},
 		{"TUNING (set by --intensity; a flag here overrides the preset)", []string{"rate", "concurrency", "timeout", "tcp-port", "dns-budget", "trace", "trace-hops", "trace-budget", "sample-per-prefix", "neighbours", "retry", "refresh-interval"}},
 	},
-	footer: `COMMANDS:
+	footer: `PERMISSIONS:
+  Probing prefers ICMP echo. On Linux, ICMP (without ping sockets) and
+  --listen need root or CAP_NET_RAW. Grant it to the binary once:
+    sudo setcap cap_net_raw+ep "$(command -v lanscan)"
+  Without it, probes fall back to one TCP connect and --listen stops with
+  an error. Windows needs no extra rights for probing; --listen is Linux only.
+
+COMMANDS:
   resume   continue an interrupted run from its journal
   export   rewrite a journal as events or latest findings
   merge    combine journals from several machines
@@ -376,6 +394,7 @@ func parseConfig(args []string, stdout io.Writer) (config, error) {
 	if c.Intensity == 0 && c.Tuning != (Tuning{}) {
 		return c, usageError{errors.New("tuning flags need --intensity 1 or higher")}
 	}
+	c = c.resolved()
 	if err := validateConfig(c); err != nil {
 		return c, usageError{err}
 	}
@@ -383,20 +402,20 @@ func parseConfig(args []string, stdout io.Writer) (config, error) {
 }
 
 func validateConfig(c config) error {
+	if c.Intensity < 0 || c.Intensity > MaxIntensity {
+		return fmt.Errorf("intensity must be 0..%d", MaxIntensity)
+	}
 	if c.Limit < 1 || c.Limit > 1000000 || c.Duration <= 0 || c.DiskBudget < 1 {
 		return errors.New("positive duration/disk budget and candidate limit 1..1000000 required")
 	}
-	if c.Format != "text" && c.Format != "jsonl" && c.Format != "csv" {
-		return errors.New("format must be text, jsonl, or csv")
+	if !validFormat(c.Format) {
+		return errors.New("format must be text, csv, jsonl or csv-findings")
 	}
 	if c.Sync != "periodic" && c.Sync != "every-event" {
 		return errors.New("sync must be periodic or every-event")
 	}
 	if c.ScopeFrom != "" && c.ScopeFrom != "routes" {
 		return errors.New("scope-from must be routes")
-	}
-	if c.Intensity < 0 || c.Intensity > MaxIntensity {
-		return fmt.Errorf("intensity must be 0..%d", MaxIntensity)
 	}
 	if c.Listen < 0 || c.Listen >= c.Duration {
 		return errors.New("listen must be nonnegative and shorter than duration")
@@ -464,4 +483,14 @@ func openOutput(path string, fallback io.Writer) (io.Writer, func() error, error
 		return nil, nil, err
 	}
 	return f, f.Close, nil
+}
+
+func validFormat(f string) bool { return slices.Contains(output.Formats, f) }
+
+// minutes prints whole minutes as "5m" rather than "5m0s".
+func minutes(d time.Duration) string {
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", d/time.Minute)
+	}
+	return d.String()
 }

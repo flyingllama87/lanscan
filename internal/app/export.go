@@ -24,7 +24,7 @@ func exportFlags(o *exportOptions) *flag.FlagSet {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.StringVar(&o.path, "journal", "", "journal `FILE` to read")
 	fs.StringVar(&o.view, "view", "events", "`VIEW`: events (everything) or latest (current findings only)")
-	fs.StringVar(&o.format, "format", "text", "results `FORMAT`: text (a summary), jsonl or csv")
+	fs.StringVar(&o.format, "format", "text", "results `FORMAT`:\ntext          a readable summary\ncsv           subnets and hosts, one row each\njsonl         every event, streamed (for tools)\ncsv-findings  every finding revision, streamed (for tools)")
 	fs.StringVar(&o.output, "output", "", "write to this new `FILE` instead of stdout")
 	fs.BoolVar(&o.raw, "raw-csv", false, "keep formula-like text as is instead of neutralizing it for spreadsheets")
 	alias(fs)
@@ -33,11 +33,12 @@ func exportFlags(o *exportOptions) *flag.FlagSet {
 
 var exportPage = helpPage{
 	about: "lanscan export rewrites a journal offline; it sends nothing.",
-	usage: []string{"lanscan export -j <journal.jsonl> [-f text|jsonl|csv] [--view events|latest] [-o <file>]"},
+	usage: []string{"lanscan export -j <journal.jsonl> [-f text|csv|jsonl|csv-findings] [--view events|latest] [-o <file>]"},
 	examples: [][2]string{
 		{"lanscan export -j scan.jsonl", "the run's summary"},
 		{"lanscan export -j scan.jsonl -f jsonl", "every event as JSONL"},
-		{"lanscan export -j scan.jsonl -f csv --view latest -o findings.csv", "current findings as CSV"},
+		{"lanscan export -j scan.jsonl -f csv -o hosts.csv", "subnets and hosts as CSV"},
+		{"lanscan export -j scan.jsonl -f csv-findings --view latest", "latest finding revisions, for tools"},
 	},
 	sections: []helpSection{{"FLAGS", []string{"journal", "view", "format", "output", "raw-csv"}}},
 }
@@ -123,7 +124,7 @@ type mergeOptions struct{ format, output string }
 
 func mergeFlags(o *mergeOptions) *flag.FlagSet {
 	fs := flag.NewFlagSet("merge", flag.ContinueOnError)
-	fs.StringVar(&o.format, "format", "jsonl", "results `FORMAT`: text, jsonl or csv")
+	fs.StringVar(&o.format, "format", "jsonl", "results `FORMAT`:\ntext          a readable summary\ncsv           subnets and hosts, one row each\njsonl         every event, streamed (for tools)\ncsv-findings  every finding revision, streamed (for tools)")
 	fs.StringVar(&o.output, "output", "", "write to this new `FILE` instead of stdout")
 	alias(fs)
 	return fs
@@ -131,7 +132,7 @@ func mergeFlags(o *mergeOptions) *flag.FlagSet {
 
 var mergePage = helpPage{
 	about: "lanscan merge combines journals from several runs or machines, offline.",
-	usage: []string{"lanscan merge [-f text|jsonl|csv] [-o <file>] <journal.jsonl> <journal.jsonl>..."},
+	usage: []string{"lanscan merge [-f jsonl|text|csv|csv-findings] [-o <file>] <journal.jsonl> <journal.jsonl>..."},
 	examples: [][2]string{
 		{"lanscan merge office-a.jsonl office-b.jsonl -o all.jsonl", "one combined journal"},
 	},

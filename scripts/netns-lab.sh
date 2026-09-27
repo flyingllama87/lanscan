@@ -306,6 +306,11 @@ for want in "intensity 1" "10.30.0.9" "responded icmp" "responded tcp/8443 conne
 	if ! grep -qF "$want" "$work/summary.txt"; then echo "FAIL summary: missing '$want'"; cat "$work/summary.txt"; exit 1; fi
 done
 echo "PASS summary"; sed 's/^/  | /' "$work/summary.txt"
+"$bin" --realm lab --vantage ns0 -i 1 -f csv --include 10.0.0.0/8 --seeds "$work/seeds.txt" --tcp-port 8443 --max-operations 20 --dns-budget 0 --rate 50 --timeout 500ms > "$work/summary.csv" 2>/dev/null || true
+for want in "kind,subnet,address,name,mac,interface,this_host,gateway,hosts,responded,known_from,status" "host,10.40.0.0/24,10.40.0.5,,,h0,,,,,seed,responded tcp/8443 connected" "subnet,10.30.0.0/24,,,,h0,,10.10.0.2,1,1,route,"; do
+	if ! grep -qF "$want" "$work/summary.csv"; then echo "FAIL summary-csv: missing '$want'"; cat "$work/summary.csv"; exit 1; fi
+done
+echo "PASS summary-csv"
 
 printf 'app.corp.example\nother.test\n' > "$work/names.txt"
 run dns --intensity 1 --include 10.30.0.0/24 --seeds "$work/names.txt" --resolver 10.20.0.2 --dns-suffix corp.example --dns-budget 4 --max-operations 20 --rate 50 --timeout 500ms

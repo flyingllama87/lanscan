@@ -126,7 +126,7 @@ func discoverConfig(parent context.Context, c config, stdout, stderr io.Writer, 
 	s := &stream{run: id, realm: c.Realm, vantage: c.Vantage, epoch: 1, journal: j, renderer: renderer, reducer: discover.NewReducer(c.Limit), statuses: make(map[string]string)}
 	if sink != nil {
 		s.renderer = sink
-	} else if isTerminal(stderr) && (c.Format == "text" || c.Output != "" || !isTerminal(stdout)) {
+	} else if streams := c.Format == "jsonl" || c.Format == "csv-findings"; isTerminal(stderr) && (!streams || c.Output != "" || !isTerminal(stdout)) {
 		// A status line, unless raw events are streaming to the same terminal.
 		s.renderer = tee{newProgress(stderr), renderer}
 	}
