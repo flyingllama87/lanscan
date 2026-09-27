@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"lanscan"
+	"lanscan/internal/version"
 )
 
 func TestPassiveLibrary(t *testing.T) {
@@ -131,7 +132,7 @@ func TestLibraryListenFailsWithoutCapture(t *testing.T) {
 }
 
 func TestLibraryVersion(t *testing.T) {
-	if v := lanscan.Version(); !strings.HasPrefix(v, "0.") && !strings.Contains(v, ".") {
+	if v := lanscan.Version(); !strings.HasPrefix(v, version.Base) {
 		t.Fatalf("version %q", v)
 	}
 }
