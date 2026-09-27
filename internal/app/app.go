@@ -11,20 +11,20 @@ import (
 	"math"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
 	"lanscan/internal/importer"
 	"lanscan/internal/listen"
+	"lanscan/internal/model"
+	"lanscan/internal/version"
 )
 
 type stringsFlag []string
 
 func (s *stringsFlag) String() string     { return strings.Join(*s, ",") }
 func (s *stringsFlag) Set(v string) error { *s = append(*s, v); return nil }
-
-// Version can be set at build time via -ldflags.
-var Version = "development"
 
 // Run returns an exit code without terminating the caller, allowing integration tests.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -47,7 +47,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		usage(stdout)
 		return 0
 	case "version", "--version":
-		fmt.Fprintf(stdout, "lanscan %s (schema 1)\n", Version)
+		fmt.Fprintf(stdout, "lanscan %s (schema %d, %s %s/%s)\n", version.String(), model.SchemaVersion, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		return 0
 	default:
 		usage(stderr)

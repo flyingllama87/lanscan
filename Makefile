@@ -1,5 +1,10 @@
-GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
-VERSION ?= $(if $(GIT_VERSION),$(GIT_VERSION),development)
+# Versions match internal/version: the release on an exact v<Base> tag,
+# otherwise <Base>-dev+<revision>[.dirty].
+BASE_VERSION := $(shell sed -n 's/^const Base = "\(.*\)"/\1/p' internal/version/version.go)
+GIT_TAG := $(shell git describe --tags --exact-match --match 'v*' 2>/dev/null | sed 's/^v//')
+GIT_REV := $(shell git rev-parse --short=12 HEAD 2>/dev/null)
+GIT_DIRTY := $(shell git status --porcelain 2>/dev/null | head -n 1)
+VERSION ?= $(or $(GIT_TAG),$(BASE_VERSION)-dev$(if $(GIT_REV),+$(GIT_REV)$(if $(GIT_DIRTY),.dirty)))
 BUILDDIR ?= build
 DISTDIR ?= dist
 TOOLDIR ?= $(BUILDDIR)/tools
@@ -61,7 +66,7 @@ help:
 	@printf "  %-16s %s\n" "BINDIR" "Installation directory (current: $(BINDIR))"
 	@printf "  %-16s %s\n" "BUILDDIR" "Build output directory (current: $(BUILDDIR))"
 	@printf "  %-16s %s\n" "DISTDIR" "Release output directory (current: $(DISTDIR))"
-	@printf "  %-16s %s\n" "VERSION" "Version string (current: $(VERSION); from git describe)"
+	@printf "  %-16s %s\n" "VERSION" "Version string (current: $(VERSION); see internal/version)"
 	@printf "  %-16s %s\n" "GOOS" "Target operating system (current: $(GOOS))"
 	@printf "  %-16s %s\n" "GOARCH" "Target architecture (current: $(GOARCH))"
 	@printf "  %-16s %s\n" "GO_INSTALL_DIR" "Go installation directory (current: $(GO_INSTALL_DIR))"
@@ -82,12 +87,13 @@ deps:
 .PHONY: $(BINARY)
 $(BINARY):
 	@mkdir -p $(BUILDDIR)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags '-s -w -X main.version=$(VERSION)' -o $(BINARY) ./cmd/lanscan
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags '-s -w -X lanscan/internal/version.injected=$(VERSION)' -o $(BINARY) ./cmd/lanscan
 
 .PHONY: release
 release:
+	@if [ -n "$(GIT_TAG)" ] && [ "$(GIT_TAG)" != "$(BASE_VERSION)" ]; then echo "tag v$(GIT_TAG) does not match Base $(BASE_VERSION) in internal/version" >&2; exit 1; fi
 	@mkdir -p $(DISTDIR)/$(RELEASE_NAME)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags '-s -w -X main.version=$(VERSION)' -o $(DISTDIR)/$(RELEASE_NAME)/$(BIN_NAME) ./cmd/lanscan
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags '-s -w -X lanscan/internal/version.injected=$(VERSION)' -o $(DISTDIR)/$(RELEASE_NAME)/$(BIN_NAME) ./cmd/lanscan
 	cp README.md $(DISTDIR)/$(RELEASE_NAME)/
 	tar -zcf $(DISTDIR)/$(RELEASE_NAME).tar.gz -C $(DISTDIR) $(RELEASE_NAME)
 	rm -rf $(DISTDIR)/$(RELEASE_NAME)

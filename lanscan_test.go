@@ -129,3 +129,9 @@ func TestLibraryListenFailsWithoutCapture(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestLibraryVersion(t *testing.T) {
+	if v := lanscan.Version(); !strings.HasPrefix(v, "0.") && !strings.Contains(v, ".") {
+		t.Fatalf("version %q", v)
+	}
+}

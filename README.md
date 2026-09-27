@@ -66,13 +66,17 @@ tarballs plus `SHA256SUMS`. Override `VERSION`, `BUILDDIR`, `DISTDIR`, `GOOS`,
 or `GOARCH` as needed. Cross-building does not validate native networking at
 runtime.
 
+## Versions
+
+`lanscan version` (or `--version`), `lanscan.Version()` and every journal's `run_started` event report the build's version. The source of truth is `Base` in `internal/version/version.go`. A build of an exact `v<Base>` tag reports `<Base>`, as does `go install` of that tag; any other build reports `<Base>-dev+<revision>`, with `.dirty` for uncommitted changes. To release, commit the final `Base` and then run `git tag v<Base>`; `make release` refuses a tag that disagrees with `Base`. Afterwards, bump `Base` to the next release. The journal schema version (currently 1) is separate and changes only with the event format.
+
 The CLI sets a 128 MiB soft Go memory limit (`GOMEMLIMIT` overrides it); a
 100,000-candidate, 10,000-prefix plan peaks at about 130 MiB resident.
 
 ## Go package integration
 
 The root package exposes `DefaultConfig`, `Config`, `Tuning`, `Preset`,
-`Discover`, `Event`, and `Result`. It uses the same discovery pipeline as the CLI, in-process. No signal
+`Discover`, `Event`, `Result` and `Version`. It uses the same discovery pipeline as the CLI, in-process. No signal
 handlers or process exits are installed, and the library defaults to no journal
 and no active network traffic.
 

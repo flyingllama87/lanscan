@@ -21,12 +21,7 @@ const shutdownGrace = 5 * time.Second
 // soft limit: live data beyond it is never refused. GOMEMLIMIT overrides it.
 const softMemoryLimit = 128 << 20
 
-var version = "development"
-
 func main() {
-	if version != "" {
-		app.Version = version
-	}
 	if os.Getenv("GOMEMLIMIT") == "" {
 		debug.SetMemoryLimit(softMemoryLimit)
 	}

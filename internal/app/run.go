@@ -18,6 +18,7 @@ import (
 	"lanscan/internal/platform"
 	"lanscan/internal/probe"
 	"lanscan/internal/schedule"
+	"lanscan/internal/version"
 )
 
 func runDiscover(parent context.Context, args []string, stdout, stderr io.Writer) (code int, retErr error) {
@@ -138,7 +139,7 @@ func discoverConfig(parent context.Context, c config, stdout, stderr io.Writer, 
 	if err != nil {
 		return 1, err
 	}
-	if err = s.emit(model.Event{Type: "run_started", ObservedAt: model.Now(), Details: map[string]any{"config": c, "config_hash": configHash, "input_hash": inputHash, "version": Version, "traffic_accounting": "application operations; no packet guarantee"}}); err != nil {
+	if err = s.emit(model.Event{Type: "run_started", ObservedAt: model.Now(), Details: map[string]any{"config": c, "config_hash": configHash, "input_hash": inputHash, "version": version.String(), "traffic_accounting": "application operations; no packet guarantee"}}); err != nil {
 		return 1, err
 	}
 	return execute(parent, c, s, seeds, inventory, 0, true)

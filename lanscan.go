@@ -8,6 +8,7 @@ import (
 
 	"lanscan/internal/app"
 	"lanscan/internal/model"
+	"lanscan/internal/version"
 )
 
 // Config controls discovery. Start with DefaultConfig, set Intensity (0 is
@@ -17,6 +18,11 @@ import (
 // Output is CLI-only. Journal is optional; set NoJournal=false to enable it.
 // Format controls journal configuration metadata; events are always typed.
 type Config = app.Config
+
+// Version returns this build's version: the release version for release
+// builds and tagged module versions, otherwise the next release with a -dev
+// suffix and the source revision when Go recorded one.
+func Version() string { return version.String() }
 
 // Tuning holds advanced probing settings. Presets exist for each intensity.
 type Tuning = app.Tuning
