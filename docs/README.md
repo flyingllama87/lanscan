@@ -11,6 +11,7 @@ The central constraint is observability: **a single endpoint cannot guarantee di
 | Document | Contents |
 | --- | --- |
 | [Product scope](scope.md) | Requirements, terminology, coverage contract, release boundaries |
+| [How subnets are found](techniques.md) | Every discovery technique as implemented, by intensity |
 | [Discovery design](discovery.md) | Techniques, evidence rules, candidate generation, probe scheduling |
 | [Go architecture and platforms](architecture.md) | Components, Linux/Windows adapters, privilege degradation |
 | [CLI, data, and reliability](operations.md) | Commands, schemas, streaming, durability, resume, exit codes |

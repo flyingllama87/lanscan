@@ -2,7 +2,7 @@
 
 Evidence-led LAN subnet discovery for Linux and Windows, written in Go.
 
-This project is under active implementation. It reports configured and routed prefixes, observed addresses, and source-specific endpoint responses separately. An endpoint response never creates a guessed subnet mask. See [the design](docs/README.md) and [implementation status](docs/implementation.md).
+This project is under active implementation. It reports configured and routed prefixes, observed addresses, and source-specific endpoint responses separately. An endpoint response never creates a guessed subnet mask. See [how subnets are found](docs/techniques.md), [the design](docs/README.md) and [implementation status](docs/implementation.md).
 
 ## Build and use
 
