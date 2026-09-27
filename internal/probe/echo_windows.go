@@ -184,7 +184,8 @@ func Echo(ctx context.Context, target netip.Addr, route platform.Route, hopLimit
 		return result
 	}
 	done := make(chan Result, 1)
-	go func() { done <- nativeEcho(target, route, hopLimit, nonce, timeout, result) }()
+	// The goroutine gets its own copy of result, which is written below on cancel.
+	go func(base Result) { done <- nativeEcho(target, route, hopLimit, nonce, timeout, base) }(result)
 	select {
 	case r := <-done:
 		return r

@@ -12,8 +12,11 @@ import (
 // maxListenSightings bounds the distinct observations one listen records.
 const maxListenSightings = 10000
 
-// listenCapture is replaced by tests.
-var listenCapture = func(iface string) (capture, error) { return listen.Open(iface) }
+// listenCapture and listenSupported are replaced by tests.
+var (
+	listenCapture   = func(iface string) (capture, error) { return listen.Open(iface) }
+	listenSupported = listen.Supported
+)
 
 type capture interface {
 	Run(context.Context, time.Time, func(listen.Frame) error) error

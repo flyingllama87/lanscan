@@ -103,6 +103,7 @@ func TestHelpSectionsCoverEveryFlag(t *testing.T) {
 }
 
 func TestShortFlagsShareValues(t *testing.T) {
+	fakeListen(t, nil, nil)
 	c, err := parseConfig([]string{"-i", "2", "-f", "csv", "-l", "5s"}, nil)
 	if err != nil || c.Intensity != 2 || c.Format != "csv" || c.Listen == 0 {
 		t.Fatalf("%+v %v", c, err)

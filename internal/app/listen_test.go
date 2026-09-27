@@ -30,8 +30,9 @@ func (f *fakeCapture) Run(ctx context.Context, _ time.Time, fn func(listen.Frame
 func (f *fakeCapture) Close() error { return nil }
 
 func fakeListen(t *testing.T, frames []listen.Frame, err error) {
-	saved := listenCapture
-	t.Cleanup(func() { listenCapture = saved })
+	saved, supported := listenCapture, listenSupported
+	t.Cleanup(func() { listenCapture, listenSupported = saved, supported })
+	listenSupported = true
 	listenCapture = func(string) (capture, error) {
 		if err != nil {
 			return nil, err
@@ -111,5 +112,16 @@ func TestListenUnavailableFailsBeforeCreatingFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("journal created: %v", err)
+	}
+}
+
+func TestListenUnsupportedPlatformIsUsageError(t *testing.T) {
+	saved := listenSupported
+	t.Cleanup(func() { listenSupported = saved })
+	listenSupported = false
+	var out, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"--listen", "1s"}, &out, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "Linux only") {
+		t.Fatalf("%d %s", code, stderr.String())
 	}
 }

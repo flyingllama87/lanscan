@@ -43,4 +43,4 @@ jobs:
       # separate non-admin runner.
       - run: go test -race ./...
       - run: go build -o lanscan.exe ./cmd/lanscan
-      - run: ./lanscan.exe discover --no-journal --format text --require-capability routes --require-capability neighbors
+      - run: ./lanscan.exe --format text --require-capability routes --require-capability neighbors

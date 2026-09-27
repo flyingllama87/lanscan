@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"lanscan/internal/importer"
-	"lanscan/internal/listen"
 	"lanscan/internal/model"
 	"lanscan/internal/output"
 	"lanscan/internal/version"
@@ -420,7 +419,7 @@ func validateConfig(c config) error {
 	if c.Listen < 0 || c.Listen >= c.Duration {
 		return errors.New("listen must be nonnegative and shorter than duration")
 	}
-	if c.Listen > 0 && !listen.Supported {
+	if c.Listen > 0 && !listenSupported {
 		return errors.New("--listen is supported on Linux only")
 	}
 	if c.Intensity == 0 {
