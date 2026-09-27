@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,7 +24,7 @@ func TestPlanReportsDNSTraceAndSamplingWithoutTraffic(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, stderr bytes.Buffer
-	code := Run(context.Background(), []string{"discover", "--no-journal", "--format", "jsonl", "--realm", "lab", "--active", "--plan", "--include", "198.51.100.0/24", "--include", "192.0.2.0/24", "--seeds", seeds, "--inventory", inventory, "--dns-suffix", "corp.example", "--sample-per-prefix", "2", "--trace", "2"}, &out, &stderr)
+	code := Run(context.Background(), []string{"discover", "--no-journal", "--format", "jsonl", "--realm", "lab", "--intensity", "1", "--plan", "--include", "198.51.100.0/24", "--include", "192.0.2.0/24", "--seeds", seeds, "--inventory", inventory, "--dns-suffix", "corp.example", "--sample-per-prefix", "2", "--trace", "2"}, &out, &stderr)
 	if code != 0 {
 		t.Fatalf("%d %s", code, stderr.String())
 	}
@@ -57,10 +58,16 @@ func TestEnrichmentFlagValidation(t *testing.T) {
 		{"--resolver", "not-an-ip"},
 		{"--resolver", "224.0.0.251"},
 		{"--dns-suffix", "bad suffix"},
-		{"--sample-per-prefix", "4"},
-		{"--trace", "1", "--trace-hops", "0"},
-		{"--dns-budget", "-1"},
-		{"--refresh-interval", "10ms"},
+		{"--intensity", "1", "--sample-per-prefix", "4"},
+		{"--intensity", "1", "--trace", "1", "--trace-hops", "0"},
+		{"--intensity", "1", "--dns-budget", "-1"},
+		{"--intensity", "1", "--refresh-interval", "10ms"},
+		{"--intensity", "3", "--neighbours", "9"},
+		{"--intensity", "4"},
+		{"--intensity", "-1"},
+		{"--trace", "2"},
+		{"--listen", "-1s"},
+		{"--listen", "5m", "--duration", "1m"},
 	} {
 		var out, stderr bytes.Buffer
 		if code := Run(context.Background(), append([]string{"discover", "--no-journal"}, args...), &out, &stderr); code != 2 {
@@ -69,31 +76,49 @@ func TestEnrichmentFlagValidation(t *testing.T) {
 	}
 }
 
-// Journals written before enrichment settings existed must still verify.
-func TestConfigHashCompatibleWithEarlierSchema(t *testing.T) {
-	c := defaults()
-	c.DNSBudget, c.TraceHops, c.TraceBudget, c.Refresh = 0, 0, 0, 0
-	b, err := json.Marshal(c)
+func TestIntensityPresetsAndOverrides(t *testing.T) {
+	c, err := parseConfig([]string{"--intensity", "2", "--trace", "0"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fields map[string]any
-	if err := json.Unmarshal(b, &fields); err != nil {
+	want := Preset(2)
+	want.Trace = 0
+	if c.Tuning != want {
+		t.Fatalf("%+v", c.Tuning)
+	}
+	if c, err = parseConfig(nil, io.Discard); err != nil || c.Tuning != (Tuning{}) || c.active() {
+		t.Fatalf("passive default: %+v %v", c, err)
+	}
+	if c, _ = parseConfig([]string{"--intensity=3"}, io.Discard); c.Neighbours == 0 || !c.active() {
+		t.Fatalf("%+v", c.Tuning)
+	}
+	// A configuration file overrides the preset field by field; flags win.
+	path := filepath.Join(t.TempDir(), "c.json")
+	if err := os.WriteFile(path, []byte(`{"intensity":2,"tuning":{"retry":0}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"dns_suffix", "resolver", "dns_budget", "trace", "trace_hops", "trace_budget", "sample_per_prefix", "refresh_interval"} {
-		if _, ok := fields[k]; ok {
-			t.Fatalf("zero-valued %s changes earlier configuration hashes", k)
-		}
-	}
-	var decoded config
-	if err := decodeValue(fields, &decoded); err != nil {
+	c, err = parseConfig([]string{"--config", path, "--rate", "7"}, io.Discard)
+	if err != nil {
 		t.Fatal(err)
+	}
+	want = Preset(2)
+	want.Retry, want.Rate = 0, 7
+	if c.Intensity != 2 || c.Tuning != want {
+		t.Fatalf("%+v", c)
+	}
+	// Library callers may set only the intensity.
+	lib := DefaultConfig()
+	lib.Intensity = 2
+	if lib.resolved().Tuning != Preset(2) {
+		t.Fatal("zero tuning not filled from preset")
 	}
 	h1, _ := hashValue(c)
-	h2, _ := hashValue(decoded)
-	if h1 != h2 {
-		t.Fatal("hash changed across decode")
+	var decoded config
+	if err := decodeValue(c, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if h2, _ := hashValue(decoded); h1 != h2 {
+		t.Fatal("configuration hash changed across decode")
 	}
 }
 

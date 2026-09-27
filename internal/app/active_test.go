@@ -89,7 +89,7 @@ func activeRun(t *testing.T, extra ...string) (int, string, []model.Event) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "run.jsonl")
-	args := append([]string{"discover", "--active", "--include", "198.51.100.0/24", "--seeds", seeds, "--dns-suffix", "corp.example",
+	args := append([]string{"discover", "--intensity", "1", "--include", "198.51.100.0/24", "--seeds", seeds, "--dns-suffix", "corp.example",
 		"--journal", path, "--format", "jsonl", "--realm", "lab", "--rate", "1000", "--timeout", "100ms", "--refresh-interval", "0"}, extra...)
 	var out, stderr bytes.Buffer
 	code := Run(context.Background(), args, &out, &stderr)
@@ -112,7 +112,7 @@ func TestActivePipelineReservesBeforeEveryOperation(t *testing.T) {
 	}
 	reserved := map[string]bool{}
 	reachable := map[string]string{}
-	var reservations, traces int
+	var reservations, traces, hops int
 	var ptr, forward bool
 	var finished *model.Event
 	for i, e := range events {
@@ -135,6 +135,9 @@ func TestActivePipelineReservesBeforeEveryOperation(t *testing.T) {
 		case e.Type == "run_finished":
 			finished = &events[i]
 		}
+		if e.Type == "observation" && e.Source == "trace" {
+			hops++
+		}
 		if e.Source == "dns_reverse" && e.Name == "echo.corp.example" {
 			ptr = true
 		}
@@ -147,8 +150,8 @@ func TestActivePipelineReservesBeforeEveryOperation(t *testing.T) {
 			t.Errorf("%s reachability %q, want %q", addr, reachable[addr.String()], want)
 		}
 	}
-	if !forward || !ptr || traces != 1 {
-		t.Errorf("forward=%v ptr=%v traces=%d", forward, ptr, traces)
+	if !forward || !ptr || traces != 1 || hops == 0 {
+		t.Errorf("forward=%v ptr=%v traces=%d hops=%d", forward, ptr, traces, hops)
 	}
 	if finished == nil || finished.Outcome != "completed" {
 		t.Fatalf("run_finished: %+v", finished)
@@ -173,5 +176,31 @@ func TestActivePipelineStopsAtOperationBudget(t *testing.T) {
 	}
 	if code != 3 || reason != "operation_budget_exhausted" || reservations != 1 {
 		t.Fatalf("code %d reason %q reservations %d", code, reason, reservations)
+	}
+}
+
+func TestNoIPv6SendsNoIPv6Work(t *testing.T) {
+	fakeNetwork(t)
+	code, stderr, events := activeRun(t, "--no-ipv6")
+	if code != 0 {
+		t.Fatalf("%d %s", code, stderr)
+	}
+	sawA := false
+	for _, e := range events {
+		if e.Type == "capability" && e.Source == "icmp6" && e.Outcome != "disabled" {
+			t.Fatalf("icmp6 capability probed: %+v", e)
+		}
+		if q, _ := e.Details["query"].(string); q == "AAAA" {
+			t.Fatalf("AAAA lookup: %+v", e)
+		}
+		if q, _ := e.Details["query"].(string); q == "A" {
+			sawA = true
+		}
+		if a, err := netip.ParseAddr(e.Address); err == nil && a.Is6() && e.Type == "operation_reserved" {
+			t.Fatalf("IPv6 operation: %+v", e)
+		}
+	}
+	if !sawA {
+		t.Fatal("positive control: no A lookup")
 	}
 }

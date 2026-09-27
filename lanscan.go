@@ -10,11 +10,22 @@ import (
 	"lanscan/internal/model"
 )
 
-// Config controls discovery. Start with DefaultConfig, then override fields.
+// Config controls discovery. Start with DefaultConfig, set Intensity (0 is
+// passive), and optionally override Tuning fields, e.g. starting from
+// Preset(cfg.Intensity). A zero Tuning uses the intensity's preset.
 // Include/Exclude contain CIDRs; Seeds and Inventory are input file paths.
 // Output is CLI-only. Journal is optional; set NoJournal=false to enable it.
 // Format controls journal configuration metadata; events are always typed.
 type Config = app.Config
+
+// Tuning holds advanced probing settings. Presets exist for each intensity.
+type Tuning = app.Tuning
+
+// MaxIntensity is the highest supported Config.Intensity.
+const MaxIntensity = app.MaxIntensity
+
+// Preset returns the tuning an intensity implies.
+func Preset(intensity int) Tuning { return app.Preset(intensity) }
 
 // Event is a versioned observation, finding update, or lifecycle event.
 // A nil Prefix means the subnet mask is unknown. Details holds event-specific

@@ -48,10 +48,10 @@ func TestLibraryErrors(t *testing.T) {
 		t.Fatalf("cancellation lost: %v", err)
 	}
 	cfg := lanscan.DefaultConfig()
-	cfg.Active = true
-	_, err = lanscan.Discover(context.Background(), cfg, func(lanscan.Event) error { t.Fatal("callback with invalid scope"); return nil })
+	cfg.Intensity = lanscan.MaxIntensity + 1
+	_, err = lanscan.Discover(context.Background(), cfg, func(lanscan.Event) error { t.Fatal("callback with invalid intensity"); return nil })
 	if err == nil {
-		t.Fatal("active scope validation bypassed")
+		t.Fatal("intensity validation bypassed")
 	}
 	cfg = lanscan.DefaultConfig()
 	cfg.Require = []string{"missing"}

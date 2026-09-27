@@ -11,6 +11,21 @@ type Scope struct {
 	Interface string
 	// SamplePerPrefix enables synthetic IPv4 samples; zero disables them.
 	SamplePerPrefix int
+	// Neighbours guesses the first host of this many sibling prefixes on each
+	// side of every known IPv4 prefix; zero disables them.
+	Neighbours int
+	// NoIPv6 refuses every IPv6 address.
+	NoIPv6 bool
+}
+
+// PrivateSpace is the default active scope when none is given: RFC 1918 and
+// unique local addresses. The intensity's target generators bound what is
+// probed inside it; nothing enumerates it.
+var PrivateSpace = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("fc00::/7"),
 }
 
 func ParsePrefixes(values []string) ([]netip.Prefix, error) {
@@ -47,6 +62,9 @@ func (s Scope) Allows(a netip.Addr) (bool, string) {
 		return false, "invalid_address"
 	}
 	a = a.Unmap()
+	if s.NoIPv6 && a.Is6() {
+		return false, "ipv6_disabled"
+	}
 	if a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() || a == netip.MustParseAddr("255.255.255.255") {
 		return false, "non_unicast"
 	}

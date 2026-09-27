@@ -15,6 +15,9 @@ type Candidate struct {
 	Prefix      *netip.Prefix `json:"prefix"`
 	// Synthetic samples are explicitly enabled guesses inside a known prefix.
 	Synthetic bool `json:"synthetic,omitempty"`
+	// NeighbourOf is the known prefix whose sibling this synthetic guess is in.
+	// The guess claims no prefix of its own.
+	NeighbourOf *netip.Prefix `json:"neighbour_of,omitempty"`
 }
 
 // Finding is the retained state of a finding: enough to assign the next
@@ -190,8 +193,12 @@ func (r *Reducer) Plan(s Scope, realm string) ([]Candidate, map[string]int) {
 		seen[c.Address.String()] = true
 		out = append(out, c)
 	}
+	evidence := out
 	if s.SamplePerPrefix > 0 {
-		out = append(out, r.samples(s, realm, out, seen, skipped)...)
+		out = append(out, r.samples(s, realm, evidence, seen, skipped)...)
+	}
+	if s.Neighbours > 0 {
+		out = append(out, r.neighbours(s, realm, seen, skipped)...)
 	}
 	return out, skipped
 }
@@ -218,26 +225,12 @@ func (r *Reducer) samples(s Scope, realm string, evidence []Candidate, seen map[
 			covered[f.Prefix.String()] = true
 		}
 	}
-	keys := make([]string, 0, len(r.Prefixes))
-	for k := range r.Prefixes {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
 	var out []Candidate
-	done := make(map[string]bool)
-	for _, key := range keys {
-		f := r.Prefixes[key]
+	for _, f := range r.sampleable(s, realm) {
 		p := *f.Prefix
-		if f.RealmID != realm || !p.Addr().Is4() || p.Bits() < 8 || covered[p.String()] || done[p.String()] {
+		if covered[p.String()] {
 			continue
 		}
-		if f.PrefixBasis == "route" && !r.unicast[realm+"\x00"+p.String()] {
-			continue
-		}
-		if s.Interface != "" && f.InterfaceID != "" && f.InterfaceID != s.Interface {
-			continue
-		}
-		done[p.String()] = true
 		for _, a := range SampleAddresses(p, s.SamplePerPrefix) {
 			if ok, reason := s.Allows(a); !ok {
 				skipped["sample_"+reason]++
@@ -249,6 +242,84 @@ func (r *Reducer) samples(s Scope, realm string, evidence []Candidate, seen map[
 			seen[a.String()] = true
 			prefix := p
 			out = append(out, Candidate{Address: a, EvidenceIDs: f.EvidenceIDs, InterfaceID: f.InterfaceID, Prefix: &prefix, Synthetic: true})
+		}
+	}
+	return out
+}
+
+// sampleable returns the sorted known IPv4 prefixes that may seed guesses:
+// unicast-route or other evidence, on the planned interface.
+func (r *Reducer) sampleable(s Scope, realm string) []model.Event {
+	keys := make([]string, 0, len(r.Prefixes))
+	for k := range r.Prefixes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []model.Event
+	done := make(map[string]bool)
+	for _, key := range keys {
+		f := r.Prefixes[key]
+		p := *f.Prefix
+		if f.RealmID != realm || !p.Addr().Is4() || p.Bits() < 8 || done[p.String()] {
+			continue
+		}
+		if f.PrefixBasis == "route" && !r.unicast[realm+"\x00"+p.String()] {
+			continue
+		}
+		if s.Interface != "" && f.InterfaceID != "" && f.InterfaceID != s.Interface {
+			continue
+		}
+		done[p.String()] = true
+		out = append(out, f)
+	}
+	return out
+}
+
+// neighbours guesses the first usable host of up to s.Neighbours sibling
+// prefixes on each side of each known IPv4 prefix from /16 to /30, where
+// neighbouring networks are usually allocated. A guess inside a known prefix
+// at least as specific as the sibling (or /24) is already a known network and
+// is left to sampling; broader summary routes do not suppress guesses. A
+// guess is one address, never a sweep, and a response to it claims no prefix.
+func (r *Reducer) neighbours(s Scope, realm string, seen map[string]bool, skipped map[string]int) []Candidate {
+	var out []Candidate
+	for _, f := range r.sampleable(s, realm) {
+		p := f.Prefix.Masked()
+		if p.Bits() < 16 || p.Bits() > 30 {
+			continue
+		}
+		b := p.Addr().As4()
+		base := int64(b[0])<<24 | int64(b[1])<<16 | int64(b[2])<<8 | int64(b[3])
+		size := int64(1) << (32 - p.Bits())
+		for k := 1; k <= s.Neighbours; k++ {
+			for _, start := range []int64{base - int64(k)*size, base + int64(k)*size} {
+				if start < 0 || start+size > 1<<32 {
+					continue
+				}
+				v := uint32(start)
+				sibling := netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}), p.Bits())
+				a := SampleAddresses(sibling, 1)[0]
+				if seen[a.String()] {
+					continue
+				}
+				known := false
+				for _, g := range r.containing(realm, a) {
+					if g.Prefix.Bits() >= min(p.Bits(), 24) {
+						known = true
+					}
+				}
+				if known {
+					skipped["neighbour_known"]++
+					continue
+				}
+				if ok, reason := s.Allows(a); !ok {
+					skipped["neighbour_"+reason]++
+					continue
+				}
+				seen[a.String()] = true
+				from := p
+				out = append(out, Candidate{Address: a, EvidenceIDs: f.EvidenceIDs, InterfaceID: f.InterfaceID, Synthetic: true, NeighbourOf: &from})
+			}
 		}
 	}
 	return out

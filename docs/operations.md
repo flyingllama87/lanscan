@@ -8,21 +8,16 @@ All commands and flags below are proposed interfaces.
 # Local collection: no active DNS, echo, TCP, or trace traffic.
 lanscan discover --format text
 
-# Preview candidates from local evidence and an optional inventory.
-lanscan discover --active --include 10.20.0.0/16 --seeds hosts.txt --plan
+# Preview what intensity 2 would probe; sends nothing.
+lanscan discover --intensity 2 --seeds hosts.txt --plan
 
 # Bounded validation with a recoverable journal and streamed CSV view.
-lanscan discover --active --include 10.20.0.0/16 --exclude 10.20.50.0/24 \
-  --seeds hosts.txt --tcp-port 443 --duration 2m --max-operations 1000 \
-  --realm corporate --vantage brisbane --journal scan.jsonl \
+lanscan discover --intensity 2 --include 10.20.0.0/16 --exclude 10.20.50.0/24 \
+  --seeds hosts.txt --realm corporate --vantage brisbane --journal scan.jsonl \
   --format csv --output findings.csv
 
-# Explicitly accept suitable installed routes as active scope.
-lanscan discover --active --scope-from routes --journal vpn-scan.jsonl
-
-# Higher durability, with disk latency accounted for by backpressure.
-lanscan discover --active --include 10.20.0.0/16 \
-  --journal durable.jsonl --sync every-event
+# A preset with one advanced override and stronger journal durability.
+lanscan discover --intensity 3 --trace 0 --journal durable.jsonl --sync every-event
 
 # Recover after interruption; refresh network context before new work.
 lanscan resume --journal scan.jsonl
@@ -34,9 +29,9 @@ lanscan merge office-a.jsonl office-b.jsonl --format jsonl
 
 `hosts.txt` contains one IP or approved FQDN per line, with blank lines and `#` comments allowed. FQDN seeds require active DNS to resolve; passive mode records them as unresolved. Explicit `--dns-suffix` controls allowable name queries. Prefix inventories use CSV fields `realm,prefix,kind,source,observed_at`; `kind` distinguishes subnet, allocation, and route. Invalid lines identify file/line and fail validation before active work. Hostnames, IPs, and CIDRs are validated as data.
 
-Other controls: `--interface`, `--source`, `--dns-suffix`, `--resolver`, `--dns-budget`, `--trace`, `--trace-budget`, `--sample-per-prefix`, `--retry`, `--rate`, `--concurrency`, `--timeout`, `--refresh-interval`, `--candidate-limit`, and `--disk-budget`. Sampling is disabled unless selected. `--retry 1` gives each target whose attempts all ended in silence one more attempt (echo, or TCP when echo is unavailable) after every first attempt; ICMP errors and refusals are answers and are not retried. `--candidate-limit` caps distinct address/name entities and, separately, distinct prefixes, so a large seed list cannot crowd out prefix evidence. Trace is opt-in initially. Default fallback TCP port is 443, one connect attempt after inconclusive echo; it sends no application payload. Operators may select another single port. Help must explain that absence of a service response is inconclusive.
+`--intensity` (0 to 3, default 0) is the one probing control most runs need; the README tabulates what each level adds. Each level is a preset of the advanced controls `--rate`, `--concurrency`, `--max-operations`, `--timeout`, `--tcp-port`, `--dns-budget`, `--trace`, `--trace-hops`, `--trace-budget`, `--sample-per-prefix`, `--neighbours`, `--retry` and `--refresh-interval`, which are rejected at intensity 0. Other controls: `--interface`, `--source`, `--dns-suffix`, `--resolver`, `--no-ipv6`, `--scope-from`, `--candidate-limit`, and `--disk-budget`. `--retry 1` gives each target whose attempts all ended in silence one more attempt (echo, or TCP when echo is unavailable) after every first attempt; ICMP errors and refusals are answers and are not retried. `--neighbours N` guesses the first usable host of N sibling prefixes on each side of each known IPv4 prefix from /16 to /30, skipping siblings inside a known prefix at least as specific as the sibling (or /24); probe events carry `neighbour_of`. `--candidate-limit` caps distinct address/name entities and, separately, distinct prefixes, so a large seed list cannot crowd out prefix evidence. The fallback TCP port is 443, one connect attempt after inconclusive echo; it sends no application payload. Absence of a service response is inconclusive.
 
-Configuration precedence: built-in defaults, config file, then CLI. Print the resolved configuration in the run header. `--plan` performs local reads only and shows unresolved names, candidate counts, scope, budgets, and capabilities; it cannot predict later DNS answers or guarantee a final packet count.
+Configuration precedence: built-in defaults, the intensity preset, config file, then CLI. Print the resolved configuration in the run header. `--plan` performs local reads only and shows unresolved names, candidate counts, scope, budgets, and capabilities; it cannot predict later DNS answers or guarantee a final packet count.
 
 ## Data model
 

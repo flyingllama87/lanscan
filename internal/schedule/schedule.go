@@ -46,6 +46,8 @@ type Config struct {
 	// NoEcho4/NoEcho6 record that the echo capability probe failed, so no
 	// operation budget is reserved for attempts that cannot send.
 	NoEcho4, NoEcho6 bool
+	// NoIPv6 skips IPv6 targets and AAAA lookups.
+	NoIPv6 bool
 	// Retry grants each silent target at most one more attempt, after every
 	// first attempt. Zero disables retries.
 	Retry int
@@ -509,6 +511,9 @@ func (r *Runner) validate(ctx context.Context, j job) error {
 		if candidate.Synthetic {
 			e.Details["synthetic_sample"] = true
 		}
+		if candidate.NeighbourOf != nil {
+			e.Details["neighbour_of"] = candidate.NeighbourOf.String()
+		}
 		if j.retry {
 			e.Details["retry"] = true
 		}
@@ -557,6 +562,9 @@ func (r *Runner) validate(ctx context.Context, j job) error {
 		}
 		if candidate.Synthetic {
 			e.Details["synthetic_sample"] = true
+		}
+		if candidate.NeighbourOf != nil {
+			e.Details["neighbour_of"] = candidate.NeighbourOf.String()
 		}
 		if j.retry {
 			e.Details["retry"] = true

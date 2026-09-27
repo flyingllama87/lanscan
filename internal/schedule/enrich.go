@@ -134,7 +134,7 @@ func (r *Runner) Forward(ctx context.Context, dns DNSContext, names []string) (i
 	answers := 0
 	err := r.boundedDNS(ctx, len(names), func(ctx context.Context, i int) error {
 		name := names[i]
-		for _, family := range []string{"ip4", "ip6"} {
+		for _, family := range r.families() {
 			if err := r.lookupForward(ctx, dns, name, family, "", func() bool {
 				mu.Lock()
 				defer mu.Unlock()
@@ -421,4 +421,12 @@ func (r *Runner) traceOne(ctx context.Context, t TraceTarget, maxHops int, flow 
 		}
 	}
 	return "hop_limit", maxHops, stable && sent, nil
+}
+
+// families lists the address families forward lookups may query.
+func (r *Runner) families() []string {
+	if r.Config.NoIPv6 {
+		return []string{"ip4"}
+	}
+	return []string{"ip4", "ip6"}
 }

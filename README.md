@@ -9,32 +9,39 @@ This project is under active implementation. It reports configured and routed pr
 ```sh
 go build -o lanscan ./cmd/lanscan
 
-# Local information only; creates an incremental JSONL journal.
-./lanscan discover
-
-# Inspect candidates without sending probes.
-./lanscan discover --active --include 10.20.0.0/16 --plan
-
-# Validate evidence-backed addresses with bounded echo/TCP attempts.
-./lanscan discover --active --include 10.20.0.0/16 \
-  --seeds hosts.txt --tcp-port 443 --max-operations 1000 \
-  --journal scan.jsonl --format csv --output findings.csv
+./lanscan discover                  # passive: local state only, sends nothing
+./lanscan discover --intensity 1    # also confirm addresses already in local evidence
+./lanscan discover --intensity 2    # also sample known prefixes and trace a few paths
+./lanscan discover --intensity 3    # also guess neighbouring prefixes
+./lanscan discover --intensity 2 --plan   # show what it would probe; sends nothing
 
 # Recover complete records and materialize the latest findings offline.
 ./lanscan export --journal scan.jsonl --view latest --format csv
 ./lanscan merge --format jsonl office-a.jsonl office-b.jsonl
 ```
 
-`hosts.txt` accepts one IP or hostname per line. In active mode, hostnames are resolved (A and AAAA, absolute names only) within `--dns-budget`; with `--dns-suffix`, only names inside approved suffixes are queried. `--resolver IP` selects an explicit DNS server, which can bypass platform split-DNS policy; by default the system resolver is used and its upstream is recorded as unknown. On 64-bit Windows the system resolver is the DNS client via `DnsQueryEx` (DNS only, so NRPT and per-adapter servers apply), and each DNS observation records the configured NRPT rule matching its name. Responders get one PTR lookup, and PTR names within approved suffixes are forward-confirmed once. DNS answers are candidates and naming evidence, never reachability. Repeated `--include` and `--exclude` flags define scope; exclusions win, including after resolution. Scope inclusion does not enumerate its addresses. `--scope-from routes` explicitly accepts private non-default unicast route ranges.
+### Intensity
+
+| Intensity | Probes | Default budget |
+|---|---|---|
+| 0 (default) | nothing; reads interfaces, routes, neighbours, resolver configuration and, where permitted, the DNS cache | 0 |
+| 1 | addresses already in local evidence (gateways, neighbours, DNS cache, seeds, inventory), plus reverse DNS for responders | 500 operations, 10/s |
+| 2 | also up to 2 addresses in each known IPv4 prefix without host evidence, 4 traces, one retry for silent targets | 2,000 operations, 20/s |
+| 3 | also the first host of 2 sibling prefixes on each side of every known IPv4 prefix (/16 to /30), 16 traces | 10,000 operations, 50/s |
+
+No intensity sweeps prefixes or scans ports: every target is an evidenced address or a small, fixed number of guesses per known prefix. A response to a guess is reported as a host; it never invents a subnet mask. Without `--include`, active runs are scoped to private address space (RFC 1918 and fc00::/7); `--include` narrows that and `--exclude` always wins. `--no-ipv6` sends, captures and looks up nothing over IPv6. `--max-operations` caps the total.
+
+Every preset setting has an advanced flag (`--rate`, `--trace`, `--sample-per-prefix`, `--neighbours`, `--retry`, `--tcp-port` and others; see `lanscan discover --help`); explicit flags and `--config` values override the preset, and the journal records the resolved values. Library callers set `Config.Intensity` and optionally `Config.Tuning`, starting from `lanscan.Preset(n)`.
 
 ```sh
-# DNS-aware validation, two targeted traces, and explicit sampling of
-# known IPv4 prefixes that have no host evidence.
-./lanscan discover --active --include 10.20.0.0/16 --seeds hosts.txt \
-  --dns-suffix corp.example --trace 2 --sample-per-prefix 1
+# Seeds, approved DNS suffixes and a narrower scope.
+./lanscan discover --intensity 2 --include 10.20.0.0/16 --exclude 10.20.50.0/24 \
+  --seeds hosts.txt --dns-suffix corp.example --journal scan.jsonl --format csv --output findings.csv
 ```
 
-Discovery is passive unless `--active` is specified. Passive runs also read resolver configuration and, where permitted, the local DNS cache (systemd-resolved 254+ or the Windows DnsClient module) without sending queries. Active validation uses ICMP echo, then one TCP connect on `--tcp-port` if echo is inconclusive. Linux uses a ping socket or raw socket with correlated ICMP errors; Windows uses the native ICMP APIs. Neither sends application payloads. `--trace N` sends hop-limited echoes to up to N routed destinations within `--trace-budget`; on Linux each trace keeps one ICMP identifier and checksum (Paris-style), so per-flow ECMP keeps it on one path. `--retry 1` gives targets that stayed silent one more attempt after all first attempts. DNS and trace together may use at most half of the remaining operation budget. Operations are bounded, but OS-managed retransmissions and neighbor resolution mean operation counts are not packet counts. Unknown or silent targets are not declared unused. During active runs, interface, address, route and rule changes start a new routing epoch. They are detected by rtnetlink or IP Helper notifications, with polling every `--refresh-interval` as the fallback; resolver configuration changes are recorded too.
+`hosts.txt` accepts one IP or hostname per line. Active runs resolve hostnames (A and AAAA, absolute names only) within the DNS budget; with `--dns-suffix`, only names inside approved suffixes are queried. `--resolver IP` selects an explicit DNS server, which can bypass platform split-DNS policy; by default the system resolver is used and its upstream is recorded as unknown. On 64-bit Windows the system resolver is the DNS client via `DnsQueryEx` (DNS only, so NRPT and per-adapter servers apply), and each DNS observation records the configured NRPT rule matching its name. Responders get one PTR lookup, and PTR names within approved suffixes are forward-confirmed once. DNS answers are candidates and naming evidence, never reachability. `--scope-from routes` adds private unicast routes of the current routing epoch to an explicit scope.
+
+Active validation uses ICMP echo, then one TCP connect on `--tcp-port` if echo is inconclusive. Linux uses a ping socket or raw socket with correlated ICMP errors; Windows uses the native ICMP APIs. Neither sends application payloads. Traces send hop-limited echoes to selected responders; on Linux each trace keeps one ICMP identifier and checksum (Paris-style), so per-flow ECMP keeps it on one path. DNS and trace together may use at most half of the remaining operation budget. Operations are bounded, but OS-managed retransmissions and neighbor resolution mean operation counts are not packet counts. Unknown or silent targets are not declared unused. During active runs, interface, address, route and rule changes start a new routing epoch. They are detected by rtnetlink or IP Helper notifications, with polling as the fallback; resolver configuration changes are recorded too.
 
 JSONL contains all events; CSV/text stream findings as they change. `run_finished` carries coverage counts relative to known prefixes and planned candidates. Journal and output files are created exclusively and never silently overwritten. `--no-journal` opts out of recoverable local storage. `--sync every-event` requests stronger file durability at additional I/O cost. Progress and errors go to stderr. After an interrupt, the process drains for at most five seconds.
 
@@ -59,17 +66,17 @@ The CLI sets a 128 MiB soft Go memory limit (`GOMEMLIMIT` overrides it); a
 
 ## Go package integration
 
-The root package exposes `DefaultConfig`, `Config`, `Discover`, `Event`, and
-`Result`. It uses the same discovery pipeline as the CLI, in-process. No signal
+The root package exposes `DefaultConfig`, `Config`, `Tuning`, `Preset`,
+`Discover`, `Event`, and `Result`. It uses the same discovery pipeline as the CLI, in-process. No signal
 handlers or process exits are installed, and the library defaults to no journal
 and no active network traffic.
 
 ```go
 cfg := lanscan.DefaultConfig()
 cfg.Realm = "office"
-// To enable validation:
-// cfg.Active = true
-// cfg.Include = []string{"10.20.0.0/16"}
+// To enable validation (Tuning follows the preset unless set):
+// cfg.Intensity = 2
+// cfg.Include = []string{"10.20.0.0/16"} // default: private address space
 // cfg.Seeds = "hosts.txt"
 
 result, err := lanscan.Discover(ctx, cfg, func(e lanscan.Event) error {

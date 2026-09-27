@@ -118,3 +118,44 @@ func TestDefaultRoutesDoNotGroupCandidates(t *testing.T) {
 		t.Fatalf("got %v want %v", got, want)
 	}
 }
+
+func TestNeighbourGuessesSkipKnownSiblingsAndClaimNoPrefix(t *testing.T) {
+	r := NewReducer(100)
+	lan := netip.MustParsePrefix("192.168.1.0/24")
+	known := netip.MustParsePrefix("192.168.2.0/25")
+	edge := netip.MustParsePrefix("10.0.0.0/16")
+	observe(t, r, 1, model.Event{Source: "interfaces", Prefix: &lan, PrefixBasis: "interface"})
+	observe(t, r, 2, model.Event{Source: "inventory", Prefix: &known, PrefixBasis: "inventory"})
+	observe(t, r, 3, model.Event{Source: "inventory", Prefix: &edge, PrefixBasis: "inventory"})
+	s := Scope{Include: []netip.Prefix{netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("10.0.0.0/8")}, Neighbours: 2}
+	candidates, skipped := r.Plan(s, "corp")
+	var got []string
+	for _, c := range candidates {
+		if c.NeighbourOf == nil || c.Prefix != nil || !c.Synthetic || len(c.EvidenceIDs) == 0 {
+			t.Fatalf("%+v", c)
+		}
+		got = append(got, c.Address.String()+"<"+c.NeighbourOf.String())
+	}
+	// Lower siblings of 10.0.0.0/16 and 192.168.1.0/24 fall outside scope;
+	// 192.168.2.1 is inside the known /25, and the /25's lower siblings inside
+	// the known /24; 192.168.3.1 is guessed once.
+	want := []string{
+		"10.1.0.1<10.0.0.0/16", "10.2.0.1<10.0.0.0/16",
+		"192.168.0.1<192.168.1.0/24", "192.168.3.1<192.168.1.0/24",
+		"192.168.2.129<192.168.2.0/25",
+	}
+	if !reflect.DeepEqual(got, want) || skipped["neighbour_known"] != 3 || skipped["neighbour_outside_scope"] != 3 {
+		t.Fatalf("%v %v", got, skipped)
+	}
+}
+
+func TestNeighbourGuessesRespectScope(t *testing.T) {
+	r := NewReducer(100)
+	lan := netip.MustParsePrefix("192.168.1.0/24")
+	observe(t, r, 1, model.Event{Source: "interfaces", Prefix: &lan, PrefixBasis: "interface"})
+	s := Scope{Include: []netip.Prefix{lan}, Neighbours: 1}
+	candidates, skipped := r.Plan(s, "corp")
+	if len(candidates) != 0 || skipped["neighbour_outside_scope"] != 2 {
+		t.Fatalf("%v %v", candidates, skipped)
+	}
+}

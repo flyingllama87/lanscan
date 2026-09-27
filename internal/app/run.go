@@ -47,6 +47,7 @@ type eventSink func(model.Event) error
 func (f eventSink) Write(e model.Event) error { return f(e) }
 
 func discoverConfig(parent context.Context, c config, stdout, stderr io.Writer, sink eventSink) (code int, retErr error) {
+	c = c.resolved()
 	if err := validateConfig(c); err != nil {
 		return 2, err
 	}
@@ -169,8 +170,11 @@ func execute(parent context.Context, c config, s *stream, seeds []importer.Seed,
 	if err := collect(ctx, s, localCollectors); err != nil {
 		return 1, err
 	}
-	active := c.Active && !c.Plan
-	scope := &liveScope{base: discover.Scope{Include: includes, Exclude: excludes, Interface: c.Interface, SamplePerPrefix: c.SamplePerPrefix}, fromRoutes: c.ScopeFrom == "routes"}
+	active := c.active()
+	if len(includes) == 0 && c.ScopeFrom == "" {
+		includes = discover.PrivateSpace
+	}
+	scope := &liveScope{base: discover.Scope{Include: includes, Exclude: excludes, Interface: c.Interface, SamplePerPrefix: c.SamplePerPrefix, Neighbours: c.Neighbours, NoIPv6: c.NoIPv6}, fromRoutes: c.ScopeFrom == "routes"}
 	scope.refresh(s)
 	dnsCtx := schedule.DNSContext{Resolver: probes.resolver, Policy: probes.resolverPolicy, Annotate: probes.dnsPolicy, Suffixes: c.DNSSuffix}
 	if c.Resolver != "" {
@@ -275,7 +279,7 @@ func (s *stream) startValidation(ctx context.Context, c config, scope *liveScope
 	s.mu.Lock()
 	left := max(c.MaxOperations-s.spent, 0)
 	s.mu.Unlock()
-	runner := &schedule.Runner{Config: schedule.Config{Rate: c.Rate, Concurrency: c.Concurrency, MaxOperations: left, Timeout: c.Timeout, Port: c.Port, Source: source, Interface: c.Interface, EnrichmentLimit: left / 2, DNSBudget: min(c.DNSBudget, left/2), TraceBudget: min(c.TraceBudget, left/2), NoEcho4: noEcho[0], NoEcho6: noEcho[1], Retry: c.Retry}, Lookup: probes.lookup, Echo: probes.echo, EchoFlow: probes.echoFlow, TCP: probes.tcp, Emit: s.emit, Reserve: s.reserve, Allow: scope.allow}
+	runner := &schedule.Runner{Config: schedule.Config{Rate: c.Rate, Concurrency: c.Concurrency, MaxOperations: left, Timeout: c.Timeout, Port: c.Port, Source: source, Interface: c.Interface, EnrichmentLimit: left / 2, DNSBudget: min(c.DNSBudget, left/2), TraceBudget: min(c.TraceBudget, left/2), NoEcho4: noEcho[0], NoEcho6: noEcho[1], NoIPv6: c.NoIPv6, Retry: c.Retry}, Lookup: probes.lookup, Echo: probes.echo, EchoFlow: probes.echoFlow, TCP: probes.tcp, Emit: s.emit, Reserve: s.reserve, Allow: scope.allow}
 	stopWatch := s.watchTopology(ctx, c.Refresh, scope)
 	if left > 0 && c.DNSBudget > 0 && len(names) > 0 {
 		if _, err := runner.Forward(ctx, dnsCtx, names); err != nil {
@@ -287,7 +291,7 @@ func (s *stream) startValidation(ctx context.Context, c config, scope *liveScope
 }
 
 func (s *stream) emitPlan(c config, planned discover.Scope, candidates []discover.Candidate, skips map[string]int, seeds []importer.Seed, names []string) error {
-	return s.emit(model.Event{Type: "plan", ObservedAt: model.Now(), Details: map[string]any{"candidates": len(candidates), "synthetic_samples": countSynthetic(candidates), "skipped": skips, "include": planned.Include, "exclude": planned.Exclude, "unresolved_names": countNames(seeds), "dns_names_eligible": len(names), "dns_budget": c.DNSBudget, "trace_destinations": c.Trace, "trace_budget": c.TraceBudget, "max_operations": c.MaxOperations, "network_operations": 0, "prediction": "candidate counts exclude later DNS answers; operations are not packets"}})
+	return s.emit(model.Event{Type: "plan", ObservedAt: model.Now(), Details: map[string]any{"candidates": len(candidates), "synthetic_samples": countSynthetic(candidates), "skipped": skips, "include": planned.Include, "exclude": planned.Exclude, "unresolved_names": countNames(seeds), "dns_names_eligible": len(names), "intensity": c.Intensity, "neighbour_guesses": countNeighbours(candidates), "dns_budget": c.DNSBudget, "trace_destinations": c.Trace, "trace_budget": c.TraceBudget, "max_operations": c.MaxOperations, "network_operations": 0, "prediction": "candidate counts exclude later DNS answers; operations are not packets"}})
 }
 
 // validateAndEnrich probes candidates, then spends remaining enrichment budget
@@ -382,13 +386,23 @@ func (s *stream) finish(parent, ctx context.Context, c config, runner *schedule.
 	coverage := s.coverage(results, methods, in.candidates)
 	epoch := s.epoch
 	s.mu.Unlock()
-	if err := s.emit(model.Event{Type: "run_finished", ObservedAt: model.Now(), Outcome: reason, Details: map[string]any{"stop_reason": reason, "elapsed_ms": time.Since(in.started).Milliseconds(), "total_elapsed_ns": int64(in.used + time.Since(in.started)), "findings": len(s.reducer.Findings), "known_prefixes": len(s.reducer.Prefixes), "candidate_addresses": len(in.candidates), "synthetic_samples": countSynthetic(in.candidates), "untested_candidates": validation.Untried, "capacity_dropped": s.reducer.Dropped, "operations": totalSpent, "segment_operations": validation.Operations, "validation": validation, "collectors": s.statuses, "skipped": in.skips, "coverage": coverage, "routing_epochs": epoch, "journal": !c.NoJournal, "sync": c.Sync, "format": c.Format, "accounting_limitations": accountingLimitations}}); err != nil {
+	if err := s.emit(model.Event{Type: "run_finished", ObservedAt: model.Now(), Outcome: reason, Details: map[string]any{"stop_reason": reason, "elapsed_ms": time.Since(in.started).Milliseconds(), "total_elapsed_ns": int64(in.used + time.Since(in.started)), "findings": len(s.reducer.Findings), "known_prefixes": len(s.reducer.Prefixes), "candidate_addresses": len(in.candidates), "synthetic_samples": countSynthetic(in.candidates), "neighbour_guesses": countNeighbours(in.candidates), "intensity": c.Intensity, "untested_candidates": validation.Untried, "capacity_dropped": s.reducer.Dropped, "operations": totalSpent, "segment_operations": validation.Operations, "validation": validation, "collectors": s.statuses, "skipped": in.skips, "coverage": coverage, "routing_epochs": epoch, "journal": !c.NoJournal, "sync": c.Sync, "format": c.Format, "accounting_limitations": accountingLimitations}}); err != nil {
 		return 1, err
 	}
 	if err := s.checkpoint(c); err != nil {
 		return 1, err
 	}
 	return code, nil
+}
+
+func countNeighbours(candidates []discover.Candidate) int {
+	n := 0
+	for _, c := range candidates {
+		if c.NeighbourOf != nil {
+			n++
+		}
+	}
+	return n
 }
 
 func countSynthetic(candidates []discover.Candidate) int {
@@ -434,6 +448,13 @@ func (s *stream) capabilities(c config) ([2]bool, error) {
 		}
 		outcome := "available"
 		details := map[string]any{}
+		if v6 && c.NoIPv6 {
+			noEcho[i] = true
+			if err := s.emit(model.Event{Type: "capability", Source: name, Outcome: "disabled", ObservedAt: model.Now()}); err != nil {
+				return noEcho, err
+			}
+			continue
+		}
 		if err := probes.capability(v6); err != nil {
 			outcome = "unavailable"
 			details["error"] = err.Error()

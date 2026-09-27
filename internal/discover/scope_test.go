@@ -42,6 +42,22 @@ func TestRouteScopeDoesNotGrantAggregatesOutsidePrivateSpace(t *testing.T) {
 	}
 }
 
+func TestPrivateSpaceScope(t *testing.T) {
+	s := Scope{Include: PrivateSpace}
+	for _, test := range []struct {
+		addr string
+		want bool
+	}{{"10.1.2.3", true}, {"172.31.0.1", true}, {"172.32.0.1", false}, {"192.168.9.9", true}, {"fd00::1", true}, {"100.64.0.1", false}, {"8.8.8.8", false}, {"2001:db8::1", false}} {
+		if got, _ := s.Allows(netip.MustParseAddr(test.addr)); got != test.want {
+			t.Errorf("%s = %v", test.addr, got)
+		}
+	}
+	s.NoIPv6 = true
+	if ok, reason := s.Allows(netip.MustParseAddr("fd00::1")); ok || reason != "ipv6_disabled" {
+		t.Fatal(ok, reason)
+	}
+}
+
 func TestBroadcastSmallPrefixes(t *testing.T) {
 	a := netip.MustParseAddr("10.1.1.31")
 	if !IsBroadcast(a, netip.MustParsePrefix("10.1.1.0/27")) {

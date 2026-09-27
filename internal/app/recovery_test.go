@@ -25,7 +25,9 @@ func partialRun(t *testing.T, active bool) (string, config) {
 	c.Realm = "corp"
 	c.Vantage = "test"
 	c.Journal = path
-	c.Active = active
+	if active {
+		c.Intensity, c.Tuning = 1, Preset(1)
+	}
 	c.Include = []string{"192.0.2.0/24"}
 	c.MaxOperations = 1
 	j, err := journal.Create(path, journal.Options{})

@@ -236,7 +236,7 @@ for backend in raw ping; do
 	# Capture on the vantage link so the trace's flow identifiers are checked on the wire.
 	tcpdump --immediate-mode -Z root -U -n -i h0 -w - icmp > "$work/trace-$backend.pcap" 2>"$work/tcpdump-$backend.err" & cap=$!
 	sleep 0.5
-	run "validate-$backend" --active --include 10.0.0.0/8 --seeds "$work/seeds.txt" --tcp-port 8443 --trace 1 --max-operations 20 --dns-budget 0 --rate 50 --timeout 500ms
+	run "validate-$backend" --intensity 1 --include 10.0.0.0/8 --seeds "$work/seeds.txt" --tcp-port 8443 --trace 1 --max-operations 20 --dns-budget 0 --rate 50 --timeout 500ms
 	sleep 0.3; kill -INT $cap; wait $cap 2>/dev/null || true
 	grep -o '"backend":"[a-z_0-9]*"' "$work/validate-$backend.jsonl" | sort -u | tr '\n' ' '; echo
 	check "$work/validate-$backend.jsonl" validate
@@ -244,18 +244,18 @@ for backend in raw ping; do
 done
 
 printf 'app.corp.example\nother.test\n' > "$work/names.txt"
-run dns --active --include 10.30.0.0/24 --seeds "$work/names.txt" --resolver 10.20.0.2 --dns-suffix corp.example --dns-budget 4 --max-operations 20 --rate 50 --timeout 500ms
+run dns --intensity 1 --include 10.30.0.0/24 --seeds "$work/names.txt" --resolver 10.20.0.2 --dns-suffix corp.example --dns-budget 4 --max-operations 20 --rate 50 --timeout 500ms
 check "$work/dns.jsonl" dns
 
 # Remove the r3 route mid-run: a new epoch must begin and stale work must skip.
 ( sleep 1.2; ip route del 10.40.0.0/24 ) &
-run epoch --active --include 10.0.0.0/8 --seeds "$work/seeds.txt" --sample-per-prefix 3 --tcp-port 8443 --rate 1 --max-operations 20 --dns-budget 0 --refresh-interval 500ms --timeout 300ms
+run epoch --intensity 1 --include 10.0.0.0/8 --seeds "$work/seeds.txt" --sample-per-prefix 3 --tcp-port 8443 --rate 1 --max-operations 20 --dns-budget 0 --refresh-interval 500ms --timeout 300ms
 check "$work/epoch.jsonl" epoch
 
 # The same change with a one-minute poll: only rtnetlink can detect it in time.
 ip route add 10.40.0.0/24 via 10.10.0.2
 ( sleep 1.2; ip route del 10.40.0.0/24 ) &
-run epoch-notify --active --include 10.0.0.0/8 --seeds "$work/seeds.txt" --sample-per-prefix 3 --tcp-port 8443 --rate 1 --max-operations 20 --dns-budget 0 --refresh-interval 60s --timeout 300ms
+run epoch-notify --intensity 1 --include 10.0.0.0/8 --seeds "$work/seeds.txt" --sample-per-prefix 3 --tcp-port 8443 --rate 1 --max-operations 20 --dns-budget 0 --refresh-interval 60s --timeout 300ms
 check "$work/epoch-notify.jsonl" epoch-notify
 
 # Wire check: a passive run sends nothing (IPv4 or ARP) from the vantage.
@@ -266,16 +266,17 @@ sleep 0.3
 # Positive control: the capture must see this ping, or zero proves nothing.
 ping -c 1 -W 1 10.50.0.2 > /dev/null
 sleep 0.3; kill -INT $cap; wait $cap 2>/dev/null || true
-packets=$(tcpdump -Z root -n -r "$work/passive.pcap" 2>/dev/null | grep -c "^[0-9][0-9]:")
-control=$(tcpdump -Z root -n -r "$work/passive.pcap" "icmp and dst host 10.50.0.2" 2>/dev/null | wc -l)
+# The control ping's echo, reply and any ARP it triggers all involve its host.
+packets=$(tcpdump -Z root -n -r "$work/passive.pcap" "not host 10.50.0.2" 2>/dev/null | grep -c "^[0-9][0-9]:" || true)
+control=$(tcpdump -Z root -n -r "$work/passive.pcap" "icmp and dst host 10.50.0.2" 2>/dev/null | grep -c "^[0-9][0-9]:" || true)
 if [ "$control" -lt 1 ]; then echo "FAIL passive-wire: capture missed the control ping"; exit 1; fi
-if [ "$packets" -ne $((control * 2)) ] && [ "$packets" -ne "$control" ]; then echo "FAIL passive-wire: $packets packets"; tcpdump -Z root -n -r "$work/passive.pcap" | head; exit 1; fi
+if [ "$packets" -ne 0 ]; then echo "FAIL passive-wire: $packets packets"; tcpdump -Z root -n -r "$work/passive.pcap" | head; exit 1; fi
 echo "PASS passive-wire: no packets besides the control ping"
 
-# Acceptance: 100 known prefixes, one responsive seed each, default profile.
+# Acceptance: 100 known prefixes, one responsive seed each, intensity 1.
 tcpdump --immediate-mode -Z root -U -n -i h1 -w - "ip or arp" > "$work/estate.pcap" 2>/dev/null & cap=$!
 sleep 0.5
-run estate --active --include 10.100.0.0/16 --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv"
+run estate --intensity 1 --include 10.100.0.0/16 --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv"
 sleep 0.3; kill -INT $cap; wait $cap 2>/dev/null || true
 check "$work/estate.jsonl" estate
 sent=$(tcpdump -Z root -n -r "$work/estate.pcap" src host 10.50.0.1 2>/dev/null | wc -l)
@@ -283,7 +284,7 @@ echo "  estate wire: $sent packets sent by the vantage (application operations a
 
 # The same estate over a lossy, high-latency link, when netem is available.
 if tc qdisc add dev h1 root netem delay 80ms loss 2% 2>/dev/null && at "$est" tc qdisc add dev e0 root netem delay 80ms loss 2% 2>/dev/null; then
-	run estate-wan --active --include 10.100.0.0/16 --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv"
+	run estate-wan --intensity 1 --include 10.100.0.0/16 --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv"
 	check "$work/estate-wan.jsonl" estate-wan
 	tc qdisc del dev h1 root; at "$est" tc qdisc del dev e0 root
 else

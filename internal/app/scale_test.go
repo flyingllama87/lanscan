@@ -57,7 +57,7 @@ func TestAcceptanceScalePlan(t *testing.T) {
 	}
 	seeds, inventory := writeScaleFixtures(t, t.TempDir())
 	c := DefaultConfig()
-	c.NoJournal, c.Plan, c.Active, c.Realm = true, true, true, "scale"
+	c.NoJournal, c.Plan, c.Intensity, c.Realm = true, true, 1, "scale"
 	c.Include = []string{"10.0.0.0/8"}
 	c.Seeds, c.Inventory = seeds, inventory
 	// Headroom for this host's own interface, neighbor and hosts-file entries.
