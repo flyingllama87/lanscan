@@ -51,6 +51,14 @@ func discoverConfig(parent context.Context, c config, stdout, stderr io.Writer, 
 	if err := validateConfig(c); err != nil {
 		return 2, err
 	}
+	// Fail before creating any file when capture is impossible.
+	if c.Listen > 0 {
+		capt, err := listenCapture(c.Interface)
+		if err != nil {
+			return 1, fmt.Errorf("--listen: %w", err)
+		}
+		capt.Close()
+	}
 	var err error
 	_, err = discover.ParsePrefixes(c.Include)
 	if err != nil {
@@ -169,6 +177,11 @@ func execute(parent context.Context, c config, s *stream, seeds []importer.Seed,
 	}
 	if err := collect(ctx, s, localCollectors); err != nil {
 		return 1, err
+	}
+	if c.Listen > 0 {
+		if err := s.listenFor(ctx, c); err != nil {
+			return 1, err
+		}
 	}
 	active := c.active()
 	if len(includes) == 0 && c.ScopeFrom == "" {

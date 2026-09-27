@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"lanscan/internal/importer"
+	"lanscan/internal/listen"
 )
 
 type stringsFlag []string
@@ -219,15 +220,26 @@ func discoverFlags(c *config, stderr io.Writer) *flag.FlagSet {
 	return fs
 }
 
+// simpleFlags lists the everyday options first, in this order.
+var simpleFlags = []string{"intensity", "listen", "plan", "include", "exclude", "no-ipv6", "seeds", "inventory", "dns-suffix", "resolver", "format", "output", "journal", "no-journal", "duration"}
+
 func printFlags(fs *flag.FlagSet, advanced bool) {
 	w := fs.Output()
-	fs.VisitAll(func(f *flag.Flag) {
-		if advancedFlags[f.Name] != advanced {
-			return
-		}
+	show := func(f *flag.Flag) {
 		fmt.Fprintf(w, "  --%s\n", f.Name)
 		for _, line := range strings.Split(f.Usage, "\n") {
 			fmt.Fprintf(w, "        %s\n", line)
+		}
+	}
+	if !advanced {
+		for _, name := range simpleFlags {
+			show(fs.Lookup(name))
+		}
+		return
+	}
+	fs.VisitAll(func(f *flag.Flag) {
+		if advancedFlags[f.Name] {
+			show(f)
 		}
 	})
 }
@@ -328,6 +340,9 @@ func validateConfig(c config) error {
 	}
 	if c.Listen < 0 || c.Listen >= c.Duration {
 		return errors.New("listen must be nonnegative and shorter than duration")
+	}
+	if c.Listen > 0 && !listen.Supported {
+		return errors.New("--listen is supported on Linux only")
 	}
 	if c.Intensity == 0 {
 		return commonChecks(c)

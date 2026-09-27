@@ -135,6 +135,7 @@ fuzz:
 	go test -run XXX -fuzz FuzzCacheParsers -fuzztime $(FUZZTIME) ./internal/platform
 	go test -run XXX -fuzz FuzzICMPQuote -fuzztime $(FUZZTIME) ./internal/probe
 	go test -run XXX -fuzz FuzzErrorQueue -fuzztime $(FUZZTIME) ./internal/probe
+	go test -run XXX -fuzz FuzzParse -fuzztime $(FUZZTIME) ./internal/listen
 
 .PHONY: bench
 bench:

@@ -8,13 +8,16 @@
 # validation on both backends with an on-wire Paris flow check, split DNS,
 # routing epochs by polling and by rtnetlink notification, the 100-prefix
 # acceptance estate (plus an 80 ms / 2% loss variant when netem is available),
-# a journal on a full filesystem, and a broken output pipe.
+# a journal on a full filesystem, a broken output pipe, and --listen (heard
+# evidence, --no-ipv6, silence on the wire, and failure without CAP_NET_RAW).
 #
 # Topology (all inside private namespaces):
 #   vantage 10.10.0.1 -- r1 (10.10.0.2 | 10.20.0.1 | 10.40.0.1)
 #                          |-- r2 10.20.0.2, target 10.30.0.9 (echo)
 #                          |-- r3 10.40.0.5 (drops echo; TCP 8443 listens)
 #   vantage 10.50.0.1 -- est 10.50.0.2, hosts 10.100.N.10 for N in 0..99
+#   vantage 10.60.0.1 -- lan 10.60.0.2 (+10.61.0.7), which broadcasts ARP,
+#                         LLDP, RIP and an IPv6 router advertisement
 set -eu
 command -v tcpdump > /dev/null || { echo "netns-lab: tcpdump is required for the wire checks" >&2; exit 1; }
 if [ "${LANSCAN_LAB_INNER:-}" != 1 ]; then
@@ -115,6 +118,44 @@ while [ $n -lt 100 ]; do
 	n=$((n + 1))
 done
 ip route add 10.100.0.0/16 via 10.50.0.2
+
+# A shared segment for --listen. IPv6 is off on the vantage side so its
+# kernel sends nothing (no DAD or MLD) that could mask lanscan's silence.
+node lan
+link h2 l2 "$lan"
+echo 1 > /proc/sys/net/ipv6/conf/h2/disable_ipv6
+ip link set h2 up
+ip addr add 10.60.0.1/24 dev h2
+at "$lan" ip link set lo up
+at "$lan" ip link set l2 up
+at "$lan" ip addr add 10.60.0.2/24 dev l2
+at "$lan" ip addr add 10.61.0.7/24 dev l2
+at "$lan" python3 -c '
+import socket, struct, time
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW); s.bind(("l2", 0))
+mac = s.getsockname()[4]
+def eth(dst, etype, body): return dst + mac + struct.pack(">H", etype) + body
+def csum(b):
+    t = sum(struct.unpack(">%dH" % (len(b) // 2), b)); t = (t >> 16) + (t & 0xffff); return ~(t + (t >> 16)) & 0xffff
+bcast = b"\xff" * 6
+ip4 = socket.inet_aton
+# Gratuitous ARP from a host in a subnet the vantage has no address in.
+arp = eth(bcast, 0x0806, struct.pack(">HHBBH", 1, 0x0800, 6, 4, 1) + mac + ip4("10.61.0.7") + b"\0" * 6 + ip4("10.61.0.7"))
+def tlv(t, v): return struct.pack(">H", t << 9 | len(v)) + v
+lldp = eth(bytes.fromhex("0180c200000e"), 0x88cc, tlv(1, b"\x04" + mac) + tlv(2, b"\x05l2") + tlv(3, b"\x00\x78") + tlv(5, b"lab-switch") + tlv(8, b"\x05\x01" + ip4("10.60.0.2") + b"\x02\0\0\0\x01\0") + tlv(0, b""))
+rip = struct.pack(">BBH", 2, 2, 0) + struct.pack(">HH", 2, 0) + ip4("10.62.0.0") + ip4("255.255.0.0") + ip4("0.0.0.0") + struct.pack(">I", 1)
+udp = struct.pack(">HHHH", 520, 520, 8 + len(rip), 0) + rip
+hdr = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 0, 0, 1, 17, 0, ip4("10.60.0.2"), ip4("255.255.255.255"))
+hdr = hdr[:10] + struct.pack(">H", csum(hdr)) + hdr[12:]
+riptx = eth(bcast, 0x0800, hdr + udp)
+pio = struct.pack(">BBBBIII", 3, 4, 64, 0xc0, 3600, 1800, 0) + socket.inet_pton(socket.AF_INET6, "fd00:60::")
+ra = struct.pack(">BBHBBHII", 134, 0, 0, 64, 0, 1800, 0, 0) + pio
+ip6 = struct.pack(">IHBB", 6 << 28, len(ra), 58, 255) + socket.inet_pton(socket.AF_INET6, "fe80::2") + socket.inet_pton(socket.AF_INET6, "ff02::1")
+ratx = eth(bytes.fromhex("333300000001"), 0x86dd, ip6 + ra)
+while True:
+    for f in (arp, lldp, riptx, ratx): s.send(f)
+    time.sleep(0.3)
+' & pids="$pids $!"
 sleep 0.3
 
 printf '10.30.0.9\n10.40.0.5\n' > "$work/seeds.txt"
@@ -169,6 +210,22 @@ elif scenario in ("epoch", "epoch-notify"):
     expect(watch and watch[0]["details"]["detection"] == "notification_and_polling", "rtnetlink notifications unavailable")
     if scenario == "epoch-notify":
         expect(epochs and epochs[0]["details"]["detection"] == "notification", "epoch not detected by notification: %r" % [e["details"].get("detection") for e in epochs])
+elif scenario in ("listen", "listen-noipv6"):
+    heard = [e for e in obs if e.get("source") == "listen"]
+    def saw(proto, **kv):
+        return any(e.get("protocol") == proto and all(e.get(k) == v for k, v in kv.items()) for e in heard)
+    expect(saw("arp", address="10.61.0.7", interface_id="h2"), "gratuitous ARP from the foreign subnet")
+    expect(any(e.get("protocol") == "lldp" and e.get("address") == "10.60.0.2" and e["details"].get("system_name") == "lab-switch" for e in heard), "LLDP neighbour")
+    expect(saw("rip", prefix="10.62.0.0/16", prefix_basis="rip"), "RIP prefix")
+    expect(any(e["type"] == "finding_upsert" and e.get("prefix") == "10.62.0.0/16" for e in events), "RIP prefix finding")
+    ra = saw("ndp", prefix="fd00:60::/64", prefix_basis="router_advertisement")
+    if scenario == "listen":
+        expect(ra, "router advertisement prefix")
+    else:
+        expect(not any(":" in (e.get("address") or "") + (e.get("prefix") or "") for e in heard), "IPv6 evidence with --no-ipv6")
+    status = [e for e in events if e["type"] == "collector_status" and e.get("source") == "listen"]
+    expect(status and status[0]["outcome"] == "complete", "listen status %r" % status)
+    expect(not any(e["type"] == "operation_reserved" for e in events), "listen reserved operations")
 elif scenario == "passive":
     expect(not any(e["type"] == "operation_reserved" for e in events), "passive run reserved operations")
 elif scenario in ("estate", "estate-wan"):
@@ -266,12 +323,39 @@ sleep 0.3
 # Positive control: the capture must see this ping, or zero proves nothing.
 ping -c 1 -W 1 10.50.0.2 > /dev/null
 sleep 0.3; kill -INT $cap; wait $cap 2>/dev/null || true
-# The control ping's echo, reply and any ARP it triggers all involve its host.
-packets=$(tcpdump -Z root -n -r "$work/passive.pcap" "not host 10.50.0.2" 2>/dev/null | grep -c "^[0-9][0-9]:" || true)
+# Only outbound frames count; the control ping and any ARP it triggers involve its host.
+packets=$(tcpdump -Z root -n -r "$work/passive.pcap" "outbound and not host 10.50.0.2" 2>/dev/null | grep -c "^[0-9][0-9]:" || true)
 control=$(tcpdump -Z root -n -r "$work/passive.pcap" "icmp and dst host 10.50.0.2" 2>/dev/null | grep -c "^[0-9][0-9]:" || true)
 if [ "$control" -lt 1 ]; then echo "FAIL passive-wire: capture missed the control ping"; exit 1; fi
 if [ "$packets" -ne 0 ]; then echo "FAIL passive-wire: $packets packets"; tcpdump -Z root -n -r "$work/passive.pcap" | head; exit 1; fi
 echo "PASS passive-wire: no packets besides the control ping"
+
+# --listen records what the segment broadcasts and sends nothing itself.
+h2mac=$(ip -o link show h2 | sed -n 's/.*link\/ether \([0-9a-f:]*\).*/\1/p')
+tcpdump --immediate-mode -Z root -U -n -e -i h2 -w - > "$work/listen.pcap" 2>/dev/null & cap=$!
+sleep 0.5
+run listen --listen 2s --interface h2
+sleep 0.3; kill -INT $cap; wait $cap 2>/dev/null || true
+check "$work/listen.jsonl" listen
+sent=$(tcpdump -Z root -n -r "$work/listen.pcap" "ether src $h2mac" 2>/dev/null | grep -c "^[0-9][0-9]:" || true)
+heard=$(tcpdump -Z root -n -r "$work/listen.pcap" "not ether src $h2mac" 2>/dev/null | grep -c "^[0-9][0-9]:" || true)
+if [ "$heard" -lt 4 ]; then echo "FAIL listen-wire: capture heard only $heard frames"; exit 1; fi
+if [ "$sent" -ne 0 ]; then echo "FAIL listen-wire: vantage sent $sent frames"; tcpdump -Z root -n -e -r "$work/listen.pcap" "ether src $h2mac" | head; exit 1; fi
+echo "PASS listen-wire: $heard frames heard, none sent"
+run listen-noipv6 --listen 2s --interface h2 --no-ipv6
+check "$work/listen-noipv6.jsonl" listen-noipv6
+
+# Without CAP_NET_RAW over this network namespace (a nested user namespace
+# does not own it), --listen must fail loudly and create no journal.
+set +e
+unshare -Ur "$bin" discover --listen 1s --journal "$work/nocap.jsonl" > /dev/null 2> "$work/nocap.err"
+code=$?
+set -e
+if [ $code -eq 1 ] && grep -q CAP_NET_RAW "$work/nocap.err" && [ ! -e "$work/nocap.jsonl" ]; then
+	echo "PASS listen-nocap exit=1: $(cat "$work/nocap.err")"
+else
+	echo "FAIL listen-nocap exit=$code: $(cat "$work/nocap.err")"; exit 1
+fi
 
 # Acceptance: 100 known prefixes, one responsive seed each, intensity 1.
 tcpdump --immediate-mode -Z root -U -n -i h1 -w - "ip or arp" > "$work/estate.pcap" 2>/dev/null & cap=$!

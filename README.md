@@ -14,6 +14,7 @@ go build -o lanscan ./cmd/lanscan
 ./lanscan discover --intensity 2    # also sample known prefixes and trace a few paths
 ./lanscan discover --intensity 3    # also guess neighbouring prefixes
 ./lanscan discover --intensity 2 --plan   # show what it would probe; sends nothing
+./lanscan discover --listen 30s     # first listen to the local segments (Linux)
 
 # Recover complete records and materialize the latest findings offline.
 ./lanscan export --journal scan.jsonl --view latest --format csv
@@ -30,6 +31,10 @@ go build -o lanscan ./cmd/lanscan
 | 3 | also the first host of 2 sibling prefixes on each side of every known IPv4 prefix (/16 to /30), 16 traces | 10,000 operations, 50/s |
 
 No intensity sweeps prefixes or scans ports: every target is an evidenced address or a small, fixed number of guesses per known prefix. A response to a guess is reported as a host; it never invents a subnet mask. Without `--include`, active runs are scoped to private address space (RFC 1918 and fc00::/7); `--include` narrows that and `--exclude` always wins. `--no-ipv6` sends, captures and looks up nothing over IPv6. `--max-operations` caps the total.
+
+### Listening
+
+`--listen DURATION` (Linux) first listens to broadcast and multicast traffic on every up, non-loopback interface (or `--interface`), then continues at the chosen intensity; heard prefixes are sampled at intensity 2 and above like any other known prefix. It records senders and what their frames claim: ARP (including hosts in subnets this machine has no address in), DHCP (leases with masks, gateways, DNS servers, relays, classless routes), IPv6 router advertisements (prefixes, routes, DNS servers), OSPF hellos (interface prefixes), RIPv2 routes, VRRP/HSRP virtual gateways, LLDP/CDP neighbours (name, port, VLAN, management address) and mDNS/SSDP/LLMNR/NetBIOS senders. It uses an AF_PACKET socket with a kernel filter that admits only received broadcast, multicast and ARP frames, and sets the interfaces to accept all multicast for its duration; it never transmits. It needs CAP_NET_RAW (`sudo setcap cap_net_raw+ep lanscan`, or root); without it, or on Windows, `--listen` fails before creating any file.
 
 Every preset setting has an advanced flag (`--rate`, `--trace`, `--sample-per-prefix`, `--neighbours`, `--retry`, `--tcp-port` and others; see `lanscan discover --help`); explicit flags and `--config` values override the preset, and the journal records the resolved values. Library callers set `Config.Intensity` and optionally `Config.Tuning`, starting from `lanscan.Preset(n)`.
 

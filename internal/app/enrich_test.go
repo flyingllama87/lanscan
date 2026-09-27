@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"lanscan/internal/journal"
@@ -127,4 +129,15 @@ func TestRequireCapabilityAcceptsCollectors(t *testing.T) {
 	if code := Run(context.Background(), []string{"discover", "--no-journal", "--require-capability", "interfaces"}, &out, &stderr); code != 0 {
 		t.Fatalf("%d %s", code, stderr.String())
 	}
+}
+
+func TestHelpListsEveryFlagOnce(t *testing.T) {
+	var out bytes.Buffer
+	fs := discoverFlags(&config{}, &out)
+	fs.Usage()
+	fs.VisitAll(func(f *flag.Flag) {
+		if n := strings.Count(out.String(), "  --"+f.Name+"\n"); n != 1 {
+			t.Errorf("--%s listed %d times", f.Name, n)
+		}
+	})
 }
