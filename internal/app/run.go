@@ -126,6 +126,9 @@ func discoverConfig(parent context.Context, c config, stdout, stderr io.Writer, 
 	s := &stream{run: id, realm: c.Realm, vantage: c.Vantage, epoch: 1, journal: j, renderer: renderer, reducer: discover.NewReducer(c.Limit), statuses: make(map[string]string)}
 	if sink != nil {
 		s.renderer = sink
+	} else if isTerminal(stderr) && (c.Format == "text" || c.Output != "" || !isTerminal(stdout)) {
+		// A status line, unless raw events are streaming to the same terminal.
+		s.renderer = tee{newProgress(stderr), renderer}
 	}
 	configHash, err := hashValue(c)
 	if err != nil {
@@ -301,7 +304,7 @@ func (s *stream) startValidation(ctx context.Context, c config, scope *liveScope
 }
 
 func (s *stream) emitPlan(c config, planned discover.Scope, candidates []discover.Candidate, skips map[string]int, seeds []importer.Seed, names []string) error {
-	return s.emit(model.Event{Type: "plan", ObservedAt: model.Now(), Details: map[string]any{"candidates": len(candidates), "synthetic_samples": countSynthetic(candidates), "skipped": skips, "include": planned.Include, "exclude": planned.Exclude, "unresolved_names": countNames(seeds), "dns_names_eligible": len(names), "intensity": c.Intensity, "neighbour_guesses": countNeighbours(candidates), "dns_budget": c.DNSBudget, "trace_destinations": c.Trace, "trace_budget": c.TraceBudget, "max_operations": c.MaxOperations, "network_operations": 0, "prediction": "candidate counts exclude later DNS answers; operations are not packets"}})
+	return s.emit(model.Event{Type: "plan", ObservedAt: model.Now(), Details: map[string]any{"targets": planTargets(candidates), "candidates": len(candidates), "synthetic_samples": countSynthetic(candidates), "skipped": skips, "include": planned.Include, "exclude": planned.Exclude, "unresolved_names": countNames(seeds), "dns_names_eligible": len(names), "intensity": c.Intensity, "neighbour_guesses": countNeighbours(candidates), "dns_budget": c.DNSBudget, "trace_destinations": c.Trace, "trace_budget": c.TraceBudget, "max_operations": c.MaxOperations, "network_operations": 0, "prediction": "candidate counts exclude later DNS answers; operations are not packets"}})
 }
 
 // validateAndEnrich probes candidates, then spends remaining enrichment budget
@@ -403,6 +406,25 @@ func (s *stream) finish(parent, ctx context.Context, c config, runner *schedule.
 		return 1, err
 	}
 	return code, nil
+}
+
+// maxPlanTargets bounds the target list a plan records.
+const maxPlanTargets = 1000
+
+// planTargets lists planned addresses with why each is a target.
+func planTargets(candidates []discover.Candidate) []map[string]string {
+	out := make([]map[string]string, 0, min(len(candidates), maxPlanTargets))
+	for _, c := range candidates[:min(len(candidates), maxPlanTargets)] {
+		kind := "known address"
+		switch {
+		case c.NeighbourOf != nil:
+			kind = "guess: neighbour of " + c.NeighbourOf.String()
+		case c.Synthetic && c.Prefix != nil:
+			kind = "guess: sample of " + c.Prefix.String()
+		}
+		out = append(out, map[string]string{"address": c.Address.String(), "kind": kind})
+	}
+	return out
 }
 
 func countNeighbours(candidates []discover.Candidate) int {

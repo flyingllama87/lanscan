@@ -1,4 +1,5 @@
-// Package output renders events without buffering findings until completion.
+// Package output renders events: jsonl streams every event, csv streams
+// finding revisions, and text prints a short summary when the run finishes.
 package output
 
 import (
@@ -13,16 +14,28 @@ import (
 )
 
 type Renderer struct {
-	format string
-	writer io.Writer
-	csv    *csv.Writer
-	raw    bool
+	format  string
+	writer  io.Writer
+	csv     *csv.Writer
+	raw     bool
+	summary *summary
+	// deferred prints the text summary only at Close, for offline commands
+	// that replay several runs.
+	deferred bool
 }
+
+// Deferred makes the text summary wait for Close.
+func (r *Renderer) Deferred() *Renderer { r.deferred = true; return r }
+
+// Summarizing reports whether the renderer builds a summary from every event.
+func (r *Renderer) Summarizing() bool { return r.summary != nil }
 
 func New(w io.Writer, format string, raw bool) (*Renderer, error) {
 	r := &Renderer{format: format, writer: w, raw: raw}
 	switch format {
-	case "jsonl", "text":
+	case "jsonl":
+	case "text":
+		r.summary = newSummary(w)
 	case "csv":
 		r.csv = csv.NewWriter(w)
 		err := r.csv.Write(strings.Split("schema_version,run_id,seq,entity_id,revision,realm_id,vantage_id,routing_epoch,observed_at,prefix,address,prefix_basis,activity_basis,reachability,protocol,port,outcome,evidence_ids", ","))
@@ -77,43 +90,19 @@ func (r *Renderer) Write(e model.Event) error {
 		r.csv.Flush()
 		return r.csv.Error()
 	case "text":
-		if e.Type == "finding_upsert" {
-			subject := e.Address
-			if e.Prefix != nil {
-				subject = e.Prefix.String()
-			}
-			if subject == "" {
-				subject = e.Name
-			}
-			_, err := fmt.Fprintf(r.writer, "%s  basis=%s activity=%s reachability=%s source=%s\n", strconv.QuoteToASCII(subject), e.PrefixBasis, e.ActivityBasis, e.Reachability, strconv.QuoteToASCII(e.Source))
-			return err
+		r.summary.observe(e)
+		if e.Type == "run_finished" && !r.deferred {
+			return r.summary.print()
 		}
-		switch e.Type {
-		case "routing_epoch":
-			_, err := fmt.Fprintf(r.writer, "routing_epoch %d reason=%v detection=%v\n", e.RoutingEpoch, e.Details["reason"], e.Details["detection"])
-			return err
-		case "resolver_change":
-			_, err := fmt.Fprintf(r.writer, "resolver_change detection=%v\n", e.Details["detection"])
-			return err
-		case "trace_finished":
-			_, err := fmt.Fprintf(r.writer, "trace %s stop=%s hops=%v\n", strconv.QuoteToASCII(e.Address), e.Outcome, e.Details["hops_sent"])
-			return err
-		case "capability":
-			_, err := fmt.Fprintf(r.writer, "capability %s %s\n", strconv.QuoteToASCII(e.Source), e.Outcome)
-			return err
-		case "run_finished", "plan":
-			if coverage, ok := e.Details["coverage"].(map[string]any); ok {
-				if _, err := fmt.Fprintf(r.writer, "coverage known_prefixes=%v responding_prefixes=%v candidate_prefixes_tested=%v untested=%v observed_addresses=%v (relative to known evidence, not the organisation)\n", coverage["known_prefixes"], coverage["prefixes_with_responding_target"], coverage["candidate_prefixes_tested"], coverage["candidate_prefixes_untested"], coverage["observed_addresses"]); err != nil {
-					return err
-				}
-			}
-			data, err := json.Marshal(e.Details)
-			if err != nil {
-				return err
-			}
-			_, err = fmt.Fprintf(r.writer, "%s %s\n", e.Type, data)
-			return err
-		}
+	}
+	return nil
+}
+
+// Close prints the text summary if run_finished never arrived, as when
+// exporting an interrupted journal.
+func (r *Renderer) Close() error {
+	if r.summary != nil {
+		return r.summary.print()
 	}
 	return nil
 }

@@ -24,7 +24,7 @@ func exportFlags(o *exportOptions) *flag.FlagSet {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.StringVar(&o.path, "journal", "", "journal `FILE` to read")
 	fs.StringVar(&o.view, "view", "events", "`VIEW`: events (everything) or latest (current findings only)")
-	fs.StringVar(&o.format, "format", "jsonl", "results `FORMAT`: text, jsonl or csv")
+	fs.StringVar(&o.format, "format", "text", "results `FORMAT`: text (a summary), jsonl or csv")
 	fs.StringVar(&o.output, "output", "", "write to this new `FILE` instead of stdout")
 	fs.BoolVar(&o.raw, "raw-csv", false, "keep formula-like text as is instead of neutralizing it for spreadsheets")
 	alias(fs)
@@ -33,10 +33,11 @@ func exportFlags(o *exportOptions) *flag.FlagSet {
 
 var exportPage = helpPage{
 	about: "lanscan export rewrites a journal offline; it sends nothing.",
-	usage: []string{"lanscan export -j <journal.jsonl> [--view events|latest] [-f text|jsonl|csv] [-o <file>]"},
+	usage: []string{"lanscan export -j <journal.jsonl> [-f text|jsonl|csv] [--view events|latest] [-o <file>]"},
 	examples: [][2]string{
-		{"lanscan export -j scan.jsonl --view latest -f csv -o findings.csv", "current findings as CSV"},
-		{"lanscan export -j scan.jsonl", "every event as JSONL"},
+		{"lanscan export -j scan.jsonl", "the run's summary"},
+		{"lanscan export -j scan.jsonl -f jsonl", "every event as JSONL"},
+		{"lanscan export -j scan.jsonl -f csv --view latest -o findings.csv", "current findings as CSV"},
 	},
 	sections: []helpSection{{"FLAGS", []string{"journal", "view", "format", "output", "raw-csv"}}},
 }
@@ -71,9 +72,11 @@ func runExport(args []string, stdout, stderr io.Writer) (int, error) {
 		closeOut()
 		return 2, err
 	}
+	r.Deferred()
 	latest := make(map[string]model.Event)
 	result, err := journal.Replay(f, func(e model.Event) error {
-		if *view == "latest" {
+		// The text summary is already the latest view and needs every event.
+		if *view == "latest" && !r.Summarizing() {
 			if e.Type == "finding_upsert" {
 				latest[model.FindingKey(e)] = e
 			}
@@ -92,6 +95,9 @@ func runExport(args []string, stdout, stderr io.Writer) (int, error) {
 				break
 			}
 		}
+	}
+	if err == nil {
+		err = r.Close()
 	}
 	closeErr := closeOut()
 	if err != nil {
@@ -173,6 +179,7 @@ func runMerge(args []string, stdout, stderr io.Writer) (int, error) {
 		closeOut()
 		return 2, err
 	}
+	r.Deferred()
 	seen := make(map[string]string)
 	partial := false
 	for _, path := range paths {
@@ -205,6 +212,9 @@ func runMerge(args []string, stdout, stderr io.Writer) (int, error) {
 				partial = true
 			}
 		}
+	}
+	if err == nil {
+		err = r.Close()
 	}
 	closeErr := closeOut()
 	if err != nil {

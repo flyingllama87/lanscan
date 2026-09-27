@@ -155,7 +155,7 @@ ratx = eth(bytes.fromhex("333300000001"), 0x86dd, ip6 + ra)
 while True:
     for f in (arp, lldp, riptx, ratx): s.send(f)
     time.sleep(0.3)
-' & pids="$pids $!"
+' 2>/dev/null & pids="$pids $!"
 sleep 0.3
 
 printf '10.30.0.9\n10.40.0.5\n' > "$work/seeds.txt"
@@ -299,6 +299,13 @@ for backend in raw ping; do
 	check "$work/validate-$backend.jsonl" validate
 	paris "$work/trace-$backend.pcap"
 done
+
+# The human summary of the same probing run.
+"$bin" --realm lab --vantage ns0 -i 1 --include 10.0.0.0/8 --seeds "$work/seeds.txt" --tcp-port 8443 --trace 1 --max-operations 20 --dns-budget 0 --rate 50 --timeout 500ms > "$work/summary.txt" 2> "$work/summary.err" || true
+for want in "intensity 1" "10.30.0.9" "responded icmp" "responded tcp/8443 connected" "10.30.0.9: 10.10.0.2 → 10.30.0.9" "seed, trace" "4 hosts responded"; do
+	if ! grep -qF "$want" "$work/summary.txt"; then echo "FAIL summary: missing '$want'"; cat "$work/summary.txt"; exit 1; fi
+done
+echo "PASS summary"; sed 's/^/  | /' "$work/summary.txt"
 
 printf 'app.corp.example\nother.test\n' > "$work/names.txt"
 run dns --intensity 1 --include 10.30.0.0/24 --seeds "$work/names.txt" --resolver 10.20.0.2 --dns-suffix corp.example --dns-budget 4 --max-operations 20 --rate 50 --timeout 500ms

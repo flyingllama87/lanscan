@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"lanscan/internal/model"
 )
 
 func run(args ...string) (int, string, string) {
@@ -103,5 +106,36 @@ func TestShortFlagsShareValues(t *testing.T) {
 	c, err := parseConfig([]string{"-i", "2", "-f", "csv", "-l", "5s"}, nil)
 	if err != nil || c.Intensity != 2 || c.Format != "csv" || c.Listen == 0 {
 		t.Fatalf("%+v %v", c, err)
+	}
+}
+
+func TestProgressLineDrawsAndClears(t *testing.T) {
+	var b bytes.Buffer
+	p := newProgress(&b)
+	p.last = time.Time{} // draw immediately
+	if err := p.Write(model.Event{Type: "operation_reserved"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "lanscan: probing · 1 operations · 0 responded") {
+		t.Fatalf("%q", b.String())
+	}
+	b.Reset()
+	_ = p.Write(model.Event{Type: "run_finished"})
+	if s := b.String(); !strings.HasPrefix(s, "\r") || !strings.HasSuffix(s, "\r") || strings.TrimSpace(s) != "" {
+		t.Fatalf("not cleared: %q", s)
+	}
+	if isTerminal(&b) {
+		t.Fatal("a buffer is not a terminal")
+	}
+}
+
+func TestExportPrintsSummaryByDefault(t *testing.T) {
+	path := t.TempDir() + "/run.jsonl"
+	if code, _, stderr := run("-j", path, "--realm", "cli"); code != 0 {
+		t.Fatal(stderr)
+	}
+	code, out, stderr := run("export", "-j", path)
+	if code != 0 || !strings.Contains(out, "SUBNETS (") || strings.Count(out, "SUBNETS (") != 1 || !strings.Contains(out, "passive (nothing sent)") {
+		t.Fatalf("%d %s %s", code, out, stderr)
 	}
 }

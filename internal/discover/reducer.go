@@ -132,7 +132,8 @@ func (r *Reducer) Commit(f model.Event) {
 		r.Prefixes[key] = f
 		r.index.add(*f.Prefix, key)
 	}
-	if f.Address != "" {
+	// This host's own addresses are neither targets nor evidence of other hosts.
+	if f.Address != "" && f.Source != "interfaces" {
 		a, err := netip.ParseAddr(f.Address)
 		if err != nil {
 			return
