@@ -46,6 +46,9 @@ type Config struct {
 	// NoEcho4/NoEcho6 record that the echo capability probe failed, so no
 	// operation budget is reserved for attempts that cannot send.
 	NoEcho4, NoEcho6 bool
+	// Retry grants each silent target at most one more attempt, after every
+	// first attempt. Zero disables retries.
+	Retry int
 }
 
 type Summary struct {
@@ -54,6 +57,7 @@ type Summary struct {
 	Responded  int            `json:"responded"`
 	Untried    int            `json:"untried"`
 	Synthetic  int            `json:"synthetic_tested"`
+	Retried    int            `json:"retried"`
 	Skipped    map[string]int `json:"skipped"`
 	StopReason string         `json:"stop_reason"`
 }
@@ -71,7 +75,10 @@ type Runner struct {
 	Config Config
 	Lookup func(netip.Addr, netip.Addr, string) (platform.Route, error)
 	Echo   func(context.Context, netip.Addr, platform.Route, int) probe.Result
-	TCP    func(context.Context, netip.Addr, platform.Route, int) probe.Result
+	// EchoFlow sends trace probes on one stable flow. When nil it defaults to
+	// probe.EchoFlow, or to Echo (without flow stability) if Echo was supplied.
+	EchoFlow func(context.Context, netip.Addr, platform.Route, int, probe.Flow) probe.Result
+	TCP      func(context.Context, netip.Addr, platform.Route, int) probe.Result
 	// Allow rechecks scope immediately before a job starts, e.g. after a routing
 	// epoch change removed route-derived scope. Nil allows every planned target.
 	Allow func(discover.Candidate) (bool, string)
@@ -95,12 +102,22 @@ type Runner struct {
 	positive     map[string]bool
 	results      map[netip.Addr]Result
 	summary      Summary
+	retries      []discover.Candidate
 }
 
 func (r *Runner) init() {
 	r.once.Do(func() {
 		if r.Lookup == nil {
 			r.Lookup = platform.LookupRoute
+		}
+		if r.EchoFlow == nil {
+			if echo := r.Echo; echo != nil {
+				r.EchoFlow = func(ctx context.Context, t netip.Addr, route platform.Route, hops int, _ probe.Flow) probe.Result {
+					return echo(ctx, t, route, hops)
+				}
+			} else {
+				r.EchoFlow = probe.EchoFlow
+			}
 		}
 		if r.Echo == nil {
 			r.Echo = probe.Echo
@@ -287,11 +304,40 @@ func interleave(candidates []discover.Candidate) []discover.Candidate {
 		groups[k] = append(groups[k], c)
 	}
 	sort.Strings(keys)
+	keys = acrossInterfaces(keys, groups)
 	out := make([]discover.Candidate, 0, len(candidates))
 	for round := 0; round < 3; round++ {
 		for _, key := range keys {
 			if round < len(groups[key]) {
 				out = append(out, groups[key][round])
+			}
+		}
+	}
+	return out
+}
+
+// acrossInterfaces reorders group keys round-robin by the evidence interface
+// of each group, so one interface with many prefixes cannot fill the front of
+// the queue. Groups without interface evidence share one turn.
+func acrossInterfaces(keys []string, groups map[string][]discover.Candidate) []string {
+	byInterface := make(map[string][]string)
+	var interfaces []string
+	for _, k := range keys {
+		i := groups[k][0].InterfaceID
+		if _, ok := byInterface[i]; !ok {
+			interfaces = append(interfaces, i)
+		}
+		byInterface[i] = append(byInterface[i], k)
+	}
+	if len(interfaces) < 2 {
+		return keys
+	}
+	sort.Strings(interfaces)
+	out := make([]string, 0, len(keys))
+	for turn := 0; len(out) < len(keys); turn++ {
+		for _, i := range interfaces {
+			if turn < len(byInterface[i]) {
+				out = append(out, byInterface[i][turn])
 			}
 		}
 	}
@@ -314,15 +360,39 @@ func (r *Runner) Run(parent context.Context, candidates []discover.Candidate) (S
 		return Summary{}, err
 	}
 	r.init()
-	c := r.Config
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	before := r.Spent()
 	r.summary = Summary{Skipped: make(map[string]int), StopReason: "completed"}
+	r.retries = nil
+	firstErr := r.runJobs(ctx, cancel, breadthFirst(candidates), false)
+	// Retries follow every first attempt, so they never delay planned work.
+	if firstErr == nil && ctx.Err() == nil && r.Config.Retry > 0 {
+		r.mu.Lock()
+		retries := r.retries
+		r.retries = nil
+		r.mu.Unlock()
+		firstErr = r.runJobs(ctx, cancel, retries, true)
+	}
+	r.summary.Operations = r.Spent() - before
+	r.summary.Untried = len(candidates) - r.summary.Tested
+	if errors.Is(firstErr, ErrBudget) {
+		r.summary.StopReason = "operation_budget_exhausted"
+		firstErr = nil
+	} else if parent.Err() != nil && (firstErr == nil || errors.Is(firstErr, context.Canceled) || errors.Is(firstErr, context.DeadlineExceeded)) {
+		r.summary.StopReason = "duration_or_interrupt"
+		firstErr = nil
+	}
+	return r.summary, firstErr
+}
+
+// runJobs runs candidates on the worker pool in order and returns the first
+// error, after which remaining work is canceled.
+func (r *Runner) runJobs(ctx context.Context, cancel context.CancelFunc, ordered []discover.Candidate, retry bool) error {
 	jobs := make(chan job)
 	var wg sync.WaitGroup
 	var firstErr error
-	for i := 0; i < c.Concurrency; i++ {
+	for i := 0; i < r.Config.Concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -347,28 +417,19 @@ func (r *Runner) Run(parent context.Context, candidates []discover.Candidate) (S
 	// priority survives variable route-lookup latency across workers.
 	prev := make(chan struct{})
 	close(prev)
-dispatch:
-	for _, candidate := range breadthFirst(candidates) {
-		j := job{candidate: candidate, turn: prev, done: make(chan struct{})}
+loop:
+	for _, candidate := range ordered {
+		j := job{candidate: candidate, turn: prev, done: make(chan struct{}), retry: retry}
 		select {
 		case jobs <- j:
 			prev = j.done
 		case <-ctx.Done():
-			break dispatch
+			break loop
 		}
 	}
 	close(jobs)
 	wg.Wait()
-	r.summary.Operations = r.Spent() - before
-	r.summary.Untried = len(candidates) - r.summary.Tested
-	if errors.Is(firstErr, ErrBudget) {
-		r.summary.StopReason = "operation_budget_exhausted"
-		firstErr = nil
-	} else if parent.Err() != nil && (firstErr == nil || errors.Is(firstErr, context.Canceled) || errors.Is(firstErr, context.DeadlineExceeded)) {
-		r.summary.StopReason = "duration_or_interrupt"
-		firstErr = nil
-	}
-	return r.summary, firstErr
+	return firstErr
 }
 
 func (r *Runner) skip(reason string) { r.mu.Lock(); r.summary.Skipped[reason]++; r.mu.Unlock() }
@@ -377,6 +438,7 @@ type job struct {
 	candidate discover.Candidate
 	turn      <-chan struct{}
 	done      chan struct{}
+	retry     bool
 }
 
 func (r *Runner) validate(ctx context.Context, j job) error {
@@ -391,7 +453,12 @@ func (r *Runner) validate(ctx context.Context, j job) error {
 	candidate := j.candidate
 	group := candidateGroup(candidate)
 	r.mu.Lock()
-	if r.positive[group] || r.prefixCounts[group] >= 3 {
+	switch {
+	case j.retry && r.positive[group]:
+		r.summary.Skipped["retry_prefix_satisfied"]++
+		r.mu.Unlock()
+		return nil
+	case !j.retry && (r.positive[group] || r.prefixCounts[group] >= 3):
 		r.summary.Skipped["prefix_satisfied_or_sample_limit"]++
 		r.mu.Unlock()
 		return nil
@@ -403,13 +470,24 @@ func (r *Runner) validate(ctx context.Context, j job) error {
 			return nil
 		}
 	}
-	r.mu.Lock()
-	r.prefixCounts[group]++
-	r.mu.Unlock()
 	target := candidate.Address
-	tested := false
-	for _, method := range []string{"icmp", "tcp"} {
-		if method == "icmp" && ((target.Is4() && r.Config.NoEcho4) || (target.Is6() && r.Config.NoEcho6)) {
+	echoOK := !(target.Is4() && r.Config.NoEcho4) && !(target.Is6() && r.Config.NoEcho6)
+	methods := []string{"icmp", "tcp"}
+	if j.retry {
+		// One more attempt: echo when available, since it holds no connection state.
+		methods = methods[:1]
+		if !echoOK {
+			methods = []string{"tcp"}
+		}
+	} else {
+		r.mu.Lock()
+		r.prefixCounts[group]++
+		r.mu.Unlock()
+	}
+	tested := j.retry
+	attempted, silent := false, true
+	for _, method := range methods {
+		if method == "icmp" && !echoOK {
 			r.skip("icmp_unavailable")
 			continue
 		}
@@ -430,6 +508,9 @@ func (r *Runner) validate(ctx context.Context, j job) error {
 		e := model.Event{Details: map[string]any{"operation_id": operationID}, Address: target.String(), Source: "probe", SourceAddress: route.Source.String(), InterfaceID: route.Interface, Protocol: method, EvidenceIDs: candidate.EvidenceIDs}
 		if candidate.Synthetic {
 			e.Details["synthetic_sample"] = true
+		}
+		if j.retry {
+			e.Details["retry"] = true
 		}
 		if method == "tcp" {
 			e.Port = r.Config.Port
@@ -477,6 +558,18 @@ func (r *Runner) validate(ctx context.Context, j job) error {
 		if candidate.Synthetic {
 			e.Details["synthetic_sample"] = true
 		}
+		if j.retry {
+			e.Details["retry"] = true
+		}
+		attempted = true
+		if j.retry {
+			r.mu.Lock()
+			r.summary.Retried++
+			r.mu.Unlock()
+		}
+		if result.Outcome != "timeout" {
+			silent = false
+		}
 		if result.Response {
 			e.Reachability = "endpoint_response"
 			e.ActivityBasis = "active_response"
@@ -494,6 +587,12 @@ func (r *Runner) validate(ctx context.Context, j job) error {
 			r.mu.Unlock()
 			return nil
 		}
+	}
+	// Only silence is retried; an ICMP error or refusal is already an answer.
+	if !j.retry && attempted && silent && r.Config.Retry > 0 {
+		r.mu.Lock()
+		r.retries = append(r.retries, candidate)
+		r.mu.Unlock()
 	}
 	return nil
 }

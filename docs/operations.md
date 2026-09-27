@@ -34,7 +34,7 @@ lanscan merge office-a.jsonl office-b.jsonl --format jsonl
 
 `hosts.txt` contains one IP or approved FQDN per line, with blank lines and `#` comments allowed. FQDN seeds require active DNS to resolve; passive mode records them as unresolved. Explicit `--dns-suffix` controls allowable name queries. Prefix inventories use CSV fields `realm,prefix,kind,source,observed_at`; `kind` distinguishes subnet, allocation, and route. Invalid lines identify file/line and fail validation before active work. Hostnames, IPs, and CIDRs are validated as data.
 
-Other controls: `--interface`, `--source`, `--dns-suffix`, `--resolver`, `--dns-budget`, `--trace`, `--trace-budget`, `--sample-per-prefix`, `--rate`, `--concurrency`, `--timeout`, `--candidate-limit`, and `--disk-budget`. Sampling is disabled unless selected. Trace is opt-in initially. Default fallback TCP port is 443, one connect attempt after inconclusive echo; it sends no application payload. Operators may select another single port. Help must explain that absence of a service response is inconclusive.
+Other controls: `--interface`, `--source`, `--dns-suffix`, `--resolver`, `--dns-budget`, `--trace`, `--trace-budget`, `--sample-per-prefix`, `--retry`, `--rate`, `--concurrency`, `--timeout`, `--refresh-interval`, `--candidate-limit`, and `--disk-budget`. Sampling is disabled unless selected. `--retry 1` gives each target whose attempts all ended in silence one more attempt (echo, or TCP when echo is unavailable) after every first attempt; ICMP errors and refusals are answers and are not retried. `--candidate-limit` caps distinct address/name entities and, separately, distinct prefixes, so a large seed list cannot crowd out prefix evidence. Trace is opt-in initially. Default fallback TCP port is 443, one connect attempt after inconclusive echo; it sends no application payload. Operators may select another single port. Help must explain that absence of a service response is inconclusive.
 
 Configuration precedence: built-in defaults, config file, then CLI. Print the resolved configuration in the run header. `--plan` performs local reads only and shows unresolved names, candidate counts, scope, budgets, and capabilities; it cannot predict later DNS answers or guarantee a final packet count.
 
@@ -42,7 +42,7 @@ Configuration precedence: built-in defaults, config file, then CLI. Print the re
 
 Canonical journal event types:
 
-- `run_started`, `capability`, `collector_status`, `routing_epoch`.
+- `run_started`, `capability`, `collector_status`, `routing_epoch` (with `detection`: `notification` from rtnetlink or IP Helper, or `polling`), `resolver_change`.
 - `observation`: immutable source evidence, including routes, addresses, cache records, and probe outcomes.
 - `finding_upsert`: derived host/prefix state, with monotonically increasing per-entity revision and evidence references.
 - `checkpoint`, `run_finished`: progress and completion/stop reason.

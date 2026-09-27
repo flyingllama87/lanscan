@@ -21,14 +21,20 @@ type Options struct {
 }
 
 type Writer struct {
-	mu        sync.Mutex
-	file      *os.File
-	guard     *os.File
-	path      string
-	options   Options
-	size      int64
-	pending   int
-	failure   error
+	mu      sync.Mutex
+	file    *os.File
+	guard   *os.File
+	path    string
+	options Options
+	size    int64
+	pending int
+	failure error
+	// written and durable count records; syncing marks an fsync running
+	// without the lock so concurrent Sync callers can share it.
+	written   uint64
+	durable   uint64
+	syncing   bool
+	synced    *sync.Cond
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
@@ -44,9 +50,15 @@ func Create(path string, opts Options) (*Writer, error) {
 		guard.Close()
 		return nil, err
 	}
-	w := &Writer{file: f, guard: guard, path: path, options: opts, stop: make(chan struct{}), done: make(chan struct{})}
+	return start(f, guard, path, opts, 0), nil
+}
+
+// start wraps an open journal positioned at size and begins periodic syncing.
+func start(f, guard *os.File, path string, opts Options, size int64) *Writer {
+	w := &Writer{file: f, guard: guard, path: path, options: opts, size: size, stop: make(chan struct{}), done: make(chan struct{})}
+	w.synced = sync.NewCond(&w.mu)
 	go w.syncLoop()
-	return w, nil
+	return w
 }
 
 func (w *Writer) syncLoop() {
@@ -71,12 +83,20 @@ func (w *Writer) syncLocked() error {
 	if w.failure != nil {
 		return w.failure
 	}
+	target := w.written
 	if err := w.file.Sync(); err != nil {
 		w.failure = err
 		return err
 	}
-	w.pending = 0
+	w.markDurableLocked(target)
 	return nil
+}
+
+func (w *Writer) markDurableLocked(n uint64) {
+	if n > w.durable {
+		w.durable = n
+	}
+	w.pending = int(w.written - w.durable)
 }
 
 func (w *Writer) Append(e model.Event) error {
@@ -109,6 +129,7 @@ func (w *Writer) Append(e model.Event) error {
 		w.failure = err
 		return err
 	}
+	w.written++
 	w.pending++
 	if w.options.EveryEvent || w.pending >= 100 {
 		return w.syncLocked()
@@ -116,14 +137,50 @@ func (w *Writer) Append(e model.Event) error {
 	return nil
 }
 
-func (w *Writer) Sync() error { w.mu.Lock(); defer w.mu.Unlock(); return w.syncLocked() }
-func (w *Writer) Err() error  { w.mu.Lock(); defer w.mu.Unlock(); return w.failure }
+// Sync returns once every record appended before the call is durable. The
+// fsync runs without the writer lock, and concurrent callers share one fsync
+// (group commit), so appends and other writers are not stalled by disk latency.
+func (w *Writer) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	target := w.written
+	for {
+		if w.failure != nil {
+			return w.failure
+		}
+		if w.durable >= target {
+			return nil
+		}
+		if !w.syncing {
+			break
+		}
+		w.synced.Wait()
+	}
+	w.syncing = true
+	n := w.written
+	w.mu.Unlock()
+	err := w.file.Sync()
+	w.mu.Lock()
+	w.syncing = false
+	if err != nil && w.failure == nil {
+		w.failure = err
+	} else if err == nil {
+		w.markDurableLocked(n)
+	}
+	w.synced.Broadcast()
+	return w.failure
+}
+
+func (w *Writer) Err() error { w.mu.Lock(); defer w.mu.Unlock(); return w.failure }
 func (w *Writer) Close() error {
 	w.closeOnce.Do(func() {
 		close(w.stop)
 		<-w.done
 		w.mu.Lock()
 		defer w.mu.Unlock()
+		for w.syncing {
+			w.synced.Wait()
+		}
 		w.syncLocked()
 		err := w.file.Close()
 		if e := w.guard.Close(); err == nil {

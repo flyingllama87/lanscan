@@ -3,9 +3,7 @@
 package lanscan
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 
 	"lanscan/internal/app"
@@ -57,20 +55,14 @@ func Discover(ctx context.Context, cfg Config, emit func(Event) error) (Result, 
 	code, err := app.Discover(ctx, cfg, func(e model.Event) error {
 		// The reducer retains maps and slices from internal events. Copy across the
 		// public boundary so consumers cannot alter evidence or race with the engine.
-		data, err := json.Marshal(e)
+		copied, err := snapshot(e)
 		if err != nil {
 			return err
 		}
-		var snapshot Event
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.UseNumber()
-		if err := decoder.Decode(&snapshot); err != nil {
-			return err
+		if copied.Type == "run_finished" {
+			result.Finished = &copied
 		}
-		if snapshot.Type == "run_finished" {
-			result.Finished = &snapshot
-		}
-		return emit(snapshot)
+		return emit(copied)
 	})
 	result.ExitCode = code
 	if err != nil {

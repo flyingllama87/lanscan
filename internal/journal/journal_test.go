@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,4 +87,85 @@ func FuzzReplay(f *testing.F) {
 		}
 		_, _ = Replay(bytes.NewReader(b), nil)
 	})
+}
+
+// BenchmarkReservation measures the durable append made before every network
+// operation. It bounds the achievable dispatch rate. Set LANSCAN_BENCH_DIR to
+// measure a particular filesystem (the default temp directory may be tmpfs).
+func BenchmarkReservation(b *testing.B) {
+	dir := os.Getenv("LANSCAN_BENCH_DIR")
+	if dir == "" {
+		dir = b.TempDir()
+	}
+	path := filepath.Join(dir, "bench-"+strconv.FormatInt(time.Now().UnixNano(), 36)+".jsonl")
+	defer os.Remove(path + ".lock")
+	defer os.Remove(path)
+	w, err := Create(path, Options{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer w.Close()
+	var seq uint64
+	for b.Loop() {
+		seq++
+		e := event(seq, "operation_reserved")
+		e.Address, e.Protocol = "10.20.30.40", "icmp"
+		e.Details = map[string]any{"operation_id": "0123456789abcdef0123456789abcdef"}
+		if err := w.Append(e); err != nil {
+			b.Fatal(err)
+		}
+		if err := w.Sync(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestConcurrentSyncGroupCommit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.jsonl")
+	w, err := Create(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var seq uint64
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 25 {
+				mu.Lock()
+				seq++
+				kind := "observation"
+				if seq == 1 {
+					kind = "run_started"
+				}
+				err := w.Append(event(seq, kind))
+				mu.Unlock()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if err := w.Sync(); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	w.mu.Lock()
+	written, durable, pending := w.written, w.durable, w.pending
+	w.mu.Unlock()
+	if written != 200 || durable != written || pending != 0 {
+		t.Fatalf("written %d durable %d pending %d", written, durable, pending)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := Replay(bytes.NewReader(b), nil); err != nil || result.Records != 200 {
+		t.Fatalf("%+v %v", result, err)
+	}
 }

@@ -130,9 +130,7 @@ func OpenResume(path string, opts Options, emit func(model.Event) error, accept 
 	if _, err = f.Seek(result.CompleteBytes, io.SeekStart); err != nil {
 		return fail(err)
 	}
-	w := &Writer{file: f, guard: guard, path: path, options: opts, size: result.CompleteBytes, stop: make(chan struct{}), done: make(chan struct{})}
-	go w.syncLoop()
-	return w, result, nil
+	return start(f, guard, path, opts, result.CompleteBytes), result, nil
 }
 
 // Checkpoint is a disposable hint, never a substitute for replaying evidence.

@@ -19,7 +19,9 @@ import (
 	"lanscan/internal/platform"
 )
 
-func pingSocket(source netip.Addr, iface string) (net.PacketConn, bool, int, error) {
+// pingSocket opens a ping socket, or a raw socket when ping sockets are not
+// permitted. A nonzero port asks a ping socket for that echo identifier.
+func pingSocket(source netip.Addr, iface string, port uint16) (net.PacketConn, bool, int, error) {
 	family, protocol := unix.AF_INET, unix.IPPROTO_ICMP
 	if source.Is6() {
 		family, protocol = unix.AF_INET6, unix.IPPROTO_ICMPV6
@@ -49,8 +51,11 @@ func pingSocket(source netip.Addr, iface string) (net.PacketConn, bool, int, err
 			return nil, raw, 0, err
 		}
 	}
+	if raw {
+		port = 0
+	}
 	if source.Is6() {
-		s := &unix.SockaddrInet6{Addr: source.As16()}
+		s := &unix.SockaddrInet6{Addr: source.As16(), Port: int(port)}
 		if source.Zone() != "" {
 			i, e := net.InterfaceByName(source.Zone())
 			if e != nil {
@@ -59,8 +64,16 @@ func pingSocket(source netip.Addr, iface string) (net.PacketConn, bool, int, err
 			s.ZoneId = uint32(i.Index)
 		}
 		err = unix.Bind(fd, s)
+		if err == unix.EADDRINUSE && port != 0 {
+			// Another socket holds the identifier; the probe loses flow stability.
+			s.Port = 0
+			err = unix.Bind(fd, s)
+		}
 	} else {
-		err = unix.Bind(fd, &unix.SockaddrInet4{Addr: source.As4()})
+		err = unix.Bind(fd, &unix.SockaddrInet4{Addr: source.As4(), Port: int(port)})
+		if err == unix.EADDRINUSE && port != 0 {
+			err = unix.Bind(fd, &unix.SockaddrInet4{Addr: source.As4()})
+		}
 	}
 	if err != nil {
 		return nil, raw, 0, err
@@ -87,17 +100,26 @@ func EchoCapability(ipv6 bool) error {
 	if ipv6 {
 		a = netip.IPv6Unspecified()
 	}
-	c, _, _, err := pingSocket(a, "")
+	c, _, _, err := pingSocket(a, "", 0)
 	if err == nil {
 		err = c.Close()
 	}
 	return err
 }
 
+// FlowStableTrace reports that EchoFlow can hold a trace's flow identifiers.
+const FlowStableTrace = true
+
 func Echo(ctx context.Context, target netip.Addr, route platform.Route, hopLimit int) Result {
+	return EchoFlow(ctx, target, route, hopLimit, Flow{})
+}
+
+// EchoFlow sends one echo; a nonzero flow keeps the identifier and checksum
+// of every probe in a trace constant (see Flow).
+func EchoFlow(ctx context.Context, target netip.Addr, route platform.Route, hopLimit int, flow Flow) Result {
 	start := time.Now()
 	result := Result{Backend: "linux_ping_socket"}
-	c, raw, id, err := pingSocket(route.Source, route.Interface)
+	c, raw, id, err := pingSocket(route.Source, route.Interface, flow.ID)
 	if err != nil {
 		result.Outcome = "unavailable"
 		result.Error = err.Error()
@@ -134,16 +156,30 @@ func Echo(ctx context.Context, target netip.Addr, route platform.Route, hopLimit
 			return result
 		}
 	}
-	nonce := make([]byte, 20)
-	if _, err = rand.Read(nonce); err != nil {
-		result.Outcome = "local_error"
-		result.Error = err.Error()
-		return result
+	var nonce []byte
+	var seq int
+	if flow.IsZero() {
+		nonce = make([]byte, 20)
+		if _, err = rand.Read(nonce); err != nil {
+			result.Outcome = "local_error"
+			result.Error = err.Error()
+			return result
+		}
+		if raw {
+			id = int(binary.BigEndian.Uint16(nonce[:2]))
+		}
+		seq = int(binary.BigEndian.Uint16(nonce[2:4]))
+	} else {
+		if raw {
+			id = int(flow.ID)
+		}
+		s := flow.seq(hopLimit)
+		seq, nonce = int(s), flow.payload(s)
 	}
-	if raw {
-		id = int(binary.BigEndian.Uint16(nonce[:2]))
+	flowLabel := ""
+	if !flow.IsZero() && id == int(flow.ID) {
+		flowLabel = FlowParis
 	}
-	seq := int(binary.BigEndian.Uint16(nonce[2:4]))
 	request := icmp.Message{Type: typ, Body: &icmp.Echo{ID: id, Seq: seq, Data: nonce}}
 	b, err := request.Marshal(nil)
 	if err != nil {
@@ -207,8 +243,10 @@ func Echo(ctx context.Context, target netip.Addr, route platform.Route, hopLimit
 	if matched != nil {
 		matched.Backend = result.Backend
 		matched.RTT = time.Since(start)
+		matched.Flow = flowLabel
 		return *matched
 	}
+	result.Flow = flowLabel
 	result.Outcome = "timeout"
 	if ctx.Err() == context.Canceled {
 		result.Outcome = "canceled"
@@ -391,20 +429,6 @@ func sockaddrAddr(sa unix.Sockaddr) netip.Addr {
 		return netip.AddrFrom16(v.Addr).Unmap()
 	}
 	return netip.Addr{}
-}
-
-func peerAddress(peer net.Addr) netip.Addr {
-	var ip net.IP
-	switch p := peer.(type) {
-	case *net.UDPAddr:
-		ip = p.IP
-	case *net.IPAddr:
-		ip = p.IP
-	default:
-		return netip.Addr{}
-	}
-	a, _ := netip.AddrFromSlice(ip)
-	return a.Unmap()
 }
 
 func matchQuote(b []byte, target netip.Addr, id, seq int) bool {

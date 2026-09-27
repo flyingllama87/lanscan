@@ -25,7 +25,7 @@ go build -o lanscan ./cmd/lanscan
 ./lanscan merge --format jsonl office-a.jsonl office-b.jsonl
 ```
 
-`hosts.txt` accepts one IP or hostname per line. In active mode, hostnames are resolved (A and AAAA, absolute names only) within `--dns-budget`; with `--dns-suffix`, only names inside approved suffixes are queried. `--resolver IP` selects an explicit DNS server, which can bypass platform split-DNS policy; by default the system resolver is used and its upstream is recorded as unknown. Responders get one PTR lookup, and PTR names within approved suffixes are forward-confirmed once. DNS answers are candidates and naming evidence, never reachability. Repeated `--include` and `--exclude` flags define scope; exclusions win, including after resolution. Scope inclusion does not enumerate its addresses. `--scope-from routes` explicitly accepts private non-default unicast route ranges.
+`hosts.txt` accepts one IP or hostname per line. In active mode, hostnames are resolved (A and AAAA, absolute names only) within `--dns-budget`; with `--dns-suffix`, only names inside approved suffixes are queried. `--resolver IP` selects an explicit DNS server, which can bypass platform split-DNS policy; by default the system resolver is used and its upstream is recorded as unknown. On 64-bit Windows the system resolver is the DNS client via `DnsQueryEx` (DNS only, so NRPT and per-adapter servers apply), and each DNS observation records the configured NRPT rule matching its name. Responders get one PTR lookup, and PTR names within approved suffixes are forward-confirmed once. DNS answers are candidates and naming evidence, never reachability. Repeated `--include` and `--exclude` flags define scope; exclusions win, including after resolution. Scope inclusion does not enumerate its addresses. `--scope-from routes` explicitly accepts private non-default unicast route ranges.
 
 ```sh
 # DNS-aware validation, two targeted traces, and explicit sampling of
@@ -34,21 +34,28 @@ go build -o lanscan ./cmd/lanscan
   --dns-suffix corp.example --trace 2 --sample-per-prefix 1
 ```
 
-Discovery is passive unless `--active` is specified. Passive runs also read resolver configuration and, where permitted, the local DNS cache (systemd-resolved 254+ or the Windows DnsClient module) without sending queries. Active validation uses ICMP echo, then one TCP connect on `--tcp-port` if echo is inconclusive. Linux uses a ping socket or raw socket with correlated ICMP errors; Windows uses the native ICMP APIs. Neither sends application payloads. `--trace N` sends hop-limited echoes to up to N routed destinations within `--trace-budget`. DNS and trace together may use at most half of the remaining operation budget. Operations are bounded, but OS-managed retransmissions and neighbor resolution mean operation counts are not packet counts. Unknown or silent targets are not declared unused. During active runs, interface and route changes (polled every `--refresh-interval`) start a new routing epoch.
+Discovery is passive unless `--active` is specified. Passive runs also read resolver configuration and, where permitted, the local DNS cache (systemd-resolved 254+ or the Windows DnsClient module) without sending queries. Active validation uses ICMP echo, then one TCP connect on `--tcp-port` if echo is inconclusive. Linux uses a ping socket or raw socket with correlated ICMP errors; Windows uses the native ICMP APIs. Neither sends application payloads. `--trace N` sends hop-limited echoes to up to N routed destinations within `--trace-budget`; on Linux each trace keeps one ICMP identifier and checksum (Paris-style), so per-flow ECMP keeps it on one path. `--retry 1` gives targets that stayed silent one more attempt after all first attempts. DNS and trace together may use at most half of the remaining operation budget. Operations are bounded, but OS-managed retransmissions and neighbor resolution mean operation counts are not packet counts. Unknown or silent targets are not declared unused. During active runs, interface, address, route and rule changes start a new routing epoch. They are detected by rtnetlink or IP Helper notifications, with polling every `--refresh-interval` as the fallback; resolver configuration changes are recorded too.
 
 JSONL contains all events; CSV/text stream findings as they change. `run_finished` carries coverage counts relative to known prefixes and planned candidates. Journal and output files are created exclusively and never silently overwritten. `--no-journal` opts out of recoverable local storage. `--sync every-event` requests stronger file durability at additional I/O cost. Progress and errors go to stderr. After an interrupt, the process drains for at most five seconds.
 
-Go 1.27 is the current build environment. Run `go test -race ./...` and `go vet ./...`. Unit tests exercise loopback echo/TCP only; they do not scan the host's LAN. `scripts/netns-lab.sh` builds a routed topology in unprivileged Linux user and network namespaces and runs the real binary end to end. Windows native tests run only on Windows (see `.github/workflows/ci.yml`); a cross-build does not validate native APIs at runtime.
+Go 1.27 is the current build environment. Run `make check` (vet, gofmt, staticcheck and race tests for Linux and Windows). Unit tests exercise loopback echo/TCP and injected probes only; they do not scan the host's LAN. `make lab` (`scripts/netns-lab.sh`, needs `tcpdump`) builds routed topologies in unprivileged Linux user and network namespaces and runs the real binary end to end, including wire captures, the 100-prefix acceptance estate and fault injection. Windows native tests run only on Windows (see `.github/workflows/ci.yml`); a cross-build does not validate native APIs at runtime.
 
 ## Make targets
 
 Run `make` for help. `make build` creates `build/lanscan` (or
-`build/lanscan.exe` for Windows); `make test` runs the race-enabled test suite.
+`build/lanscan.exe` for Windows), versioned from `git describe`. `make check`
+runs vet, lint and the race-enabled tests; `make vuln`, `make fuzz`,
+`make bench` and `make lab` run govulncheck, the fuzz targets, benchmarks and
+the namespace lab. Linters are pinned and installed under `build/tools`.
 Use `make install BINDIR="$HOME/.local/bin"` for a local installation.
-`make release` packages the selected platform, and `make release-all` builds
-Linux amd64/arm64/386 and Windows amd64/arm64 tarballs. Override `VERSION`,
-`BUILDDIR`, `GOOS`, or `GOARCH` as needed. Cross-building does not validate
-native networking at runtime.
+`make release` packages the selected platform into `dist/`, and
+`make release-all` builds Linux amd64/arm64/386 and Windows amd64/arm64
+tarballs plus `SHA256SUMS`. Override `VERSION`, `BUILDDIR`, `DISTDIR`, `GOOS`,
+or `GOARCH` as needed. Cross-building does not validate native networking at
+runtime.
+
+The CLI sets a 128 MiB soft Go memory limit (`GOMEMLIMIT` overrides it); a
+100,000-candidate, 10,000-prefix plan peaks at about 130 MiB resident.
 
 ## Go package integration
 

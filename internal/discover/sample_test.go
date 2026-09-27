@@ -93,3 +93,28 @@ func TestPlanUsesMostSpecificPrefix(t *testing.T) {
 		t.Fatalf("%+v %v", plan, skipped)
 	}
 }
+
+func TestDefaultRoutesDoNotGroupCandidates(t *testing.T) {
+	r := NewReducer(100)
+	unicast := map[string]any{"route_type": "unicast"}
+	for i, p := range []string{"0.0.0.0/0", "0.0.0.0/1", "128.0.0.0/1", "::/0", "10.1.0.0/16"} {
+		prefix := netip.MustParsePrefix(p)
+		observe(t, r, i+1, model.Event{Source: "routes", Prefix: &prefix, PrefixBasis: "route", Details: unicast})
+	}
+	for i, a := range []string{"198.51.100.10", "198.51.100.11", "10.1.2.3", "2001:db8::1"} {
+		observe(t, r, i+10, model.Event{Source: "seed", Address: a})
+	}
+	scope := Scope{Include: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}}
+	candidates, _ := r.Plan(scope, "corp")
+	got := map[string]string{}
+	for _, c := range candidates {
+		got[c.Address.String()] = ""
+		if c.Prefix != nil {
+			got[c.Address.String()] = c.Prefix.String()
+		}
+	}
+	want := map[string]string{"198.51.100.10": "", "198.51.100.11": "", "10.1.2.3": "10.1.0.0/16", "2001:db8::1": ""}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+}

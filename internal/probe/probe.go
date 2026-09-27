@@ -2,6 +2,8 @@ package probe
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
@@ -25,6 +27,8 @@ type Result struct {
 	Status uint32 `json:"status,omitempty"`
 	// Correlation describes how a response was attributed to this probe.
 	Correlation string `json:"correlation,omitempty"`
+	// Flow is FlowParis when the probe held its trace's flow identifiers.
+	Flow string `json:"flow,omitempty"`
 }
 
 func TCP(ctx context.Context, target netip.Addr, route platform.Route, port int) Result {
@@ -77,3 +81,48 @@ func isAny(err error, targets []error) bool {
 	}
 	return false
 }
+
+// flowNonceBytes is the fixed per-trace payload before the compensation word.
+const flowNonceBytes = 18
+
+// Flow keeps the ICMP echo fields that per-flow load balancers hash constant
+// across the probes of one trace (Paris traceroute): the identifier and the
+// checksum. Probes differ only in the sequence number, and a trailing payload
+// word of ^seq keeps the ones-complement sum, hence the checksum, unchanged.
+// The zero Flow sends an independent flow per probe.
+type Flow struct {
+	ID      uint16
+	SeqBase uint16
+	Nonce   [flowNonceBytes]byte
+}
+
+// NewFlow returns a random flow for one trace.
+func NewFlow() (Flow, error) {
+	var b [4 + flowNonceBytes]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return Flow{}, err
+	}
+	f := Flow{ID: binary.BigEndian.Uint16(b[:2]), SeqBase: binary.BigEndian.Uint16(b[2:4])}
+	if f.ID == 0 {
+		f.ID = 1
+	}
+	copy(f.Nonce[:], b[4:])
+	return f, nil
+}
+
+// IsZero reports whether f requests no flow stability.
+func (f Flow) IsZero() bool { return f.ID == 0 }
+
+// seq returns the sequence number for a hop-limited probe.
+func (f Flow) seq(hopLimit int) uint16 { return f.SeqBase + uint16(hopLimit) }
+
+// payload returns the echo data for seq: the trace nonce, then ^seq.
+func (f Flow) payload(seq uint16) []byte {
+	b := make([]byte, flowNonceBytes+2)
+	copy(b, f.Nonce[:])
+	binary.BigEndian.PutUint16(b[flowNonceBytes:], ^seq)
+	return b
+}
+
+// FlowParis marks a result whose probe kept its trace's identifier and checksum.
+const FlowParis = "paris_constant_id_checksum"

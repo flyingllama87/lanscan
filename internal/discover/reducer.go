@@ -17,12 +17,31 @@ type Candidate struct {
 	Synthetic bool `json:"synthetic,omitempty"`
 }
 
+// Finding is the retained state of a finding: enough to assign the next
+// revision and compute coverage. Full revisions live in the journal and output.
+type Finding struct {
+	Revision      uint64
+	Prefix        *netip.Prefix
+	Address       string
+	ActivityBasis string
+	Reachability  string
+}
+
+// findingsPerEntity bounds total findings relative to the entity limits; an
+// address accumulates one finding per protocol, source, interface and epoch.
+const findingsPerEntity = 8
+
 type Reducer struct {
+	// Limit caps distinct address/name entities, and separately distinct
+	// prefix entities, so neither class can starve the other.
 	Limit      int
-	Findings   map[string]model.Event
+	Findings   map[string]Finding
 	Candidates map[string]Candidate
 	Prefixes   map[string]model.Event
 	Dropped    int
+	// entities counts findings per entity; hosts and prefixes count entities.
+	entities        map[string]int
+	hosts, prefixes int
 	// unicast records prefixes backed by at least one unicast route, so that
 	// sampling never targets blackhole, reject, local or broadcast routes.
 	unicast map[string]bool
@@ -30,7 +49,7 @@ type Reducer struct {
 }
 
 func NewReducer(limit int) *Reducer {
-	return &Reducer{Limit: limit, Findings: make(map[string]model.Event), Candidates: make(map[string]Candidate), Prefixes: make(map[string]model.Event), unicast: make(map[string]bool)}
+	return &Reducer{Limit: limit, Findings: make(map[string]Finding), Candidates: make(map[string]Candidate), Prefixes: make(map[string]model.Event), entities: make(map[string]int), unicast: make(map[string]bool)}
 }
 
 // Observe returns a derived finding without inventing boundaries. The caller
@@ -70,7 +89,7 @@ func (r *Reducer) Observe(e model.Event) *model.Event {
 	if old, ok := r.Findings[key]; ok {
 		f.Revision = old.Revision + 1
 	} else {
-		if len(r.Findings) >= r.Limit {
+		if !r.admit(f) {
 			r.Dropped++
 			return nil
 		}
@@ -79,10 +98,34 @@ func (r *Reducer) Observe(e model.Event) *model.Event {
 	return &f
 }
 
+// admit reports whether a new finding fits the entity and total limits.
+func (r *Reducer) admit(f model.Event) bool {
+	if len(r.Findings) >= findingsPerEntity*r.Limit {
+		return false
+	}
+	if r.entities[f.EntityID] > 0 {
+		return true
+	}
+	if f.Prefix != nil {
+		return r.prefixes < r.Limit
+	}
+	return r.hosts < r.Limit
+}
+
 func (r *Reducer) Commit(f model.Event) {
-	r.Findings[model.FindingKey(f)] = f
+	key := model.FindingKey(f)
+	if _, exists := r.Findings[key]; !exists {
+		if r.entities[f.EntityID] == 0 {
+			if f.Prefix != nil {
+				r.prefixes++
+			} else {
+				r.hosts++
+			}
+		}
+		r.entities[f.EntityID]++
+	}
+	r.Findings[key] = Finding{Revision: f.Revision, Prefix: f.Prefix, Address: f.Address, ActivityBasis: f.ActivityBasis, Reachability: f.Reachability}
 	if f.Prefix != nil && f.Source != "probe" {
-		key := model.FindingKey(f)
 		r.Prefixes[key] = f
 		r.index.add(*f.Prefix, key)
 	}
@@ -129,7 +172,7 @@ func (r *Reducer) Plan(s Scope, realm string) ([]Candidate, map[string]int) {
 		}
 		broadcast := false
 		for _, f := range r.containing(realm, c.Address) {
-			if c.Prefix == nil {
+			if c.Prefix == nil && GroupingPrefix(*f.Prefix) {
 				p := *f.Prefix
 				c.Prefix = &p
 			}
@@ -151,6 +194,18 @@ func (r *Reducer) Plan(s Scope, realm string) ([]Candidate, map[string]int) {
 		out = append(out, r.samples(s, realm, out, seen, skipped)...)
 	}
 	return out, skipped
+}
+
+// GroupingPrefix reports whether p is specific enough to stand for one
+// network when pacing and satisfying candidates. Default and split-default
+// routes (and other very broad aggregates) say nothing about subnet
+// boundaries, so targets reached only through them are planned as hosts;
+// otherwise one response would mark every remote target satisfied.
+func GroupingPrefix(p netip.Prefix) bool {
+	if p.Addr().Is4() {
+		return p.Bits() >= 8
+	}
+	return p.Bits() >= 16
 }
 
 // samples adds explicitly enabled deterministic IPv4 guesses inside known

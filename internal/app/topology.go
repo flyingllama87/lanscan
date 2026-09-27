@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -102,10 +103,40 @@ func topologyFingerprint(ctx context.Context) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// watchTopology polls for interface/route changes during active work. A
-// change starts a new routing epoch, re-collects local evidence under it, and
-// refreshes scope; the scheduler's per-dispatch route recheck and scope gate
-// then skip stale work. Historical observations are retained.
+// resolverFingerprint hashes resolver configuration so a changed upstream,
+// suffix or per-link routing domain is recorded. It sends no queries.
+func resolverFingerprint(ctx context.Context) (string, error) {
+	var mu sync.Mutex
+	var lines []string
+	err := platform.Resolvers(ctx, func(e model.Event) error {
+		if e.Type != "observation" {
+			return nil
+		}
+		d, _ := json.Marshal(e.Details)
+		mu.Lock()
+		lines = append(lines, e.Address+"|"+e.InterfaceID+"|"+string(d))
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(lines)
+	h := sha256.Sum256([]byte(strings.Join(lines, "\x00")))
+	return hex.EncodeToString(h[:]), nil
+}
+
+// notifySettle coalesces the burst of messages one change produces, such as
+// a VPN adding a link, addresses and routes.
+const notifySettle = 200 * time.Millisecond
+
+// watchTopology follows interface/route changes during active work. Platform
+// notifications (rtnetlink, IP Helper) trigger an immediate check; polling
+// every interval remains as the fallback. A change starts a new routing epoch,
+// re-collects local evidence under it, and refreshes scope; the scheduler's
+// per-dispatch route recheck and scope gate then skip stale work. Resolver
+// configuration changes are recorded without a new epoch. Historical
+// observations are retained.
 func (s *stream) watchTopology(ctx context.Context, interval time.Duration, scope *liveScope) func() {
 	if interval <= 0 {
 		return func() {}
@@ -114,20 +145,68 @@ func (s *stream) watchTopology(ctx context.Context, interval time.Duration, scop
 	if err != nil {
 		return func() {}
 	}
+	resolvers, _ := resolverFingerprint(ctx)
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	notify, notifyErr := platform.WatchTopology(watchCtx)
+	details := map[string]any{"poll_interval_ns": int64(interval), "detection": "notification_and_polling"}
+	if notifyErr != nil {
+		notify = nil
+		details["detection"] = "polling"
+		details["error"] = notifyErr.Error()
+	}
+	if err := s.emit(model.Event{Type: "capability", Source: "topology_watch", Outcome: "available", ObservedAt: model.Now(), Details: details}); err != nil {
+		cancelWatch()
+		return func() {}
+	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	var once sync.Once
 	go func() {
 		defer close(done)
+		defer cancelWatch()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
+			detection := "polling"
 			select {
 			case <-stop:
 				return
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+			case _, ok := <-notify:
+				if !ok {
+					notify = nil // socket failed; polling continues
+					continue
+				}
+				detection = "notification"
+				settle := time.NewTimer(notifySettle)
+			coalesce:
+				for {
+					select {
+					case <-stop:
+						settle.Stop()
+						return
+					case <-ctx.Done():
+						settle.Stop()
+						return
+					case _, ok := <-notify:
+						if !ok {
+							notify = nil
+						}
+					case <-settle.C:
+						break coalesce
+					}
+				}
+			}
+			if next, err := resolverFingerprint(ctx); err == nil && next != resolvers {
+				resolvers = next
+				if err := s.emit(model.Event{Type: "resolver_change", ObservedAt: model.Now(), Details: map[string]any{"detection": detection}}); err != nil {
+					return
+				}
+				if err := collect(ctx, s, []func(context.Context, platform.Emit) error{platform.Resolvers}); err != nil {
+					return
+				}
 			}
 			next, err := topologyFingerprint(ctx)
 			if err != nil || next == base {
@@ -138,7 +217,7 @@ func (s *stream) watchTopology(ctx context.Context, interval time.Duration, scop
 			prior := s.epoch
 			s.epoch++
 			s.mu.Unlock()
-			if err := s.emit(model.Event{Type: "routing_epoch", ObservedAt: model.Now(), Details: map[string]any{"reason": "topology_change", "prior_epoch": prior, "detection": "polling", "race": "route changes between poll and dispatch remain possible; each dispatch rechecks the route"}}); err != nil {
+			if err := s.emit(model.Event{Type: "routing_epoch", ObservedAt: model.Now(), Details: map[string]any{"reason": "topology_change", "prior_epoch": prior, "detection": detection, "race": "route changes between detection and dispatch remain possible; each dispatch rechecks the route"}}); err != nil {
 				return
 			}
 			if err := collect(ctx, s, []func(context.Context, platform.Emit) error{platform.Interfaces, platform.Network}); err != nil {

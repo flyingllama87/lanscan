@@ -151,6 +151,15 @@ func sockaddr6(a netip.Addr) sockaddrIn6 {
 // Echo sends one synchronous native echo. The call runs on its own goroutine
 // that owns every buffer until the API returns, so cancellation never frees
 // memory still referenced by the OS.
+// FlowStableTrace is false: IcmpSendEcho2Ex assigns the identifier and
+// sequence number itself, so the checksum cannot be held constant per trace.
+const FlowStableTrace = false
+
+// EchoFlow ignores flow on Windows; see FlowStableTrace.
+func EchoFlow(ctx context.Context, target netip.Addr, route platform.Route, hopLimit int, _ Flow) Result {
+	return Echo(ctx, target, route, hopLimit)
+}
+
 func Echo(ctx context.Context, target netip.Addr, route platform.Route, hopLimit int) Result {
 	backend := "windows_icmp4"
 	if target.Is6() {

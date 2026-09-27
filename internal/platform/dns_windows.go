@@ -37,15 +37,44 @@ func Resolvers(ctx context.Context, emit Emit) error {
 				if !ok {
 					continue
 				}
-				e := model.Event{Type: "observation", Source: "resolver_config", Address: addr.Unmap().String(), InterfaceID: iface, ObservedAt: model.Now(), Details: map[string]any{"provider": "GetAdaptersAddresses", "dns_suffix": suffix, "policy": "adapter configuration; NRPT policy not represented"}}
+				e := model.Event{Type: "observation", Source: "resolver_config", Address: addr.Unmap().String(), InterfaceID: iface, ObservedAt: model.Now(), Details: map[string]any{"provider": "GetAdaptersAddresses", "dns_suffix": suffix, "policy": "adapter configuration; NRPT rules are reported separately and take precedence for matching names"}}
 				if err := emit(e); err != nil {
 					return err
 				}
 			}
 		}
-		return status(emit, "resolver_config", "complete", nil)
+		outcome := "complete"
+		if err := emitNRPT(emit); err != nil {
+			outcome = "partial"
+		}
+		return status(emit, "resolver_config", outcome, nil)
 	}
 	return status(emit, "resolver_config", "failed", windows.ERROR_BUFFER_OVERFLOW)
+}
+
+// emitNRPT records Name Resolution Policy Table rules, one observation per
+// namespace and server. Rules without servers (for example DNSSEC-only or
+// exemption rules) are recorded by namespace alone.
+func emitNRPT(emit Emit) error {
+	rules, effective, err := NRPTRules()
+	for _, r := range rules {
+		servers := r.Servers
+		if len(servers) == 0 {
+			servers = []string{""}
+		}
+		for _, ns := range r.Namespaces {
+			for _, server := range servers {
+				e := model.Event{Type: "observation", Source: "resolver_config", ObservedAt: model.Now(), Details: map[string]any{"provider": "NRPT", "policy": "nrpt", "namespace": ns, "nrpt_source": r.Source, "nrpt_rule": r.Key, "config_options": r.Options, "applied": r.Source == effective}}
+				if a, perr := netip.ParseAddr(server); perr == nil {
+					e.Address = a.Unmap().String()
+				}
+				if emitErr := emit(e); emitErr != nil {
+					return emitErr
+				}
+			}
+		}
+	}
+	return err
 }
 
 // cacheCommand is fixed text; no imported value is ever interpolated.

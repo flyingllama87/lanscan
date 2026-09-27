@@ -4,11 +4,19 @@
 #
 #   ./scripts/netns-lab.sh            # builds, then runs every scenario
 #
+# Scenarios: passive (no probes, and no packets on the wire), echo/TCP
+# validation on both backends with an on-wire Paris flow check, split DNS,
+# routing epochs by polling and by rtnetlink notification, the 100-prefix
+# acceptance estate (plus an 80 ms / 2% loss variant when netem is available),
+# a journal on a full filesystem, and a broken output pipe.
+#
 # Topology (all inside private namespaces):
 #   vantage 10.10.0.1 -- r1 (10.10.0.2 | 10.20.0.1 | 10.40.0.1)
 #                          |-- r2 10.20.0.2, target 10.30.0.9 (echo)
 #                          |-- r3 10.40.0.5 (drops echo; TCP 8443 listens)
+#   vantage 10.50.0.1 -- est 10.50.0.2, hosts 10.100.N.10 for N in 0..99
 set -eu
+command -v tcpdump > /dev/null || { echo "netns-lab: tcpdump is required for the wire checks" >&2; exit 1; }
 if [ "${LANSCAN_LAB_INNER:-}" != 1 ]; then
 	root=$(cd "$(dirname "$0")/.." && pwd)
 	work=$(mktemp -d)
@@ -85,6 +93,28 @@ while True:
 ip route add 10.20.0.0/16 via 10.10.0.2
 ip route add 10.30.0.0/24 via 10.10.0.2
 ip route add 10.40.0.0/24 via 10.10.0.2
+
+# Acceptance estate: 100 /24 prefixes behind router "est", one responsive
+# host each (10.100.N.10), known from an inventory; the vantage has only an
+# aggregate route, as with a VPN.
+node est
+link h1 e0 "$est"
+ip link set h1 up
+ip addr add 10.50.0.1/24 dev h1
+at "$est" ip link set lo up
+at "$est" ip link set e0 up
+at "$est" ip addr add 10.50.0.2/24 dev e0
+at "$est" ip route add default via 10.50.0.1
+echo "realm,prefix,kind,source,observed_at" > "$work/estate.csv"
+: > "$work/estate-seeds.txt"
+n=0
+while [ $n -lt 100 ]; do
+	at "$est" ip addr add "10.100.$n.10/32" dev lo
+	echo "lab,10.100.$n.0/24,subnet,ipam," >> "$work/estate.csv"
+	echo "10.100.$n.10" >> "$work/estate-seeds.txt"
+	n=$((n + 1))
+done
+ip route add 10.100.0.0/16 via 10.50.0.2
 sleep 0.3
 
 printf '10.30.0.9\n10.40.0.5\n' > "$work/seeds.txt"
@@ -114,6 +144,8 @@ if scenario == "validate":
     expect(all(e.get("prefix") is None for e in hops), "trace invented a prefix")
     traces = [e for e in events if e["type"] == "trace_finished"]
     expect(any(t["outcome"] == "destination_reached" for t in traces), "trace summary")
+    expect(all(t["details"].get("flow_stable") is True for t in traces), "trace lost flow stability")
+    expect(all(e["details"].get("flow") == "paris_constant_id_checksum" for e in hops), "hop without a Paris flow")
     expect(ops <= 20, "budget exceeded: %d" % ops)
     findings = [e for e in events if e["type"] == "finding_upsert" and e.get("address") == "10.30.0.9" and e.get("prefix")]
     expect(all(f["prefix"] == "10.30.0.0/24" and f["prefix_basis"] == "route" for f in findings), "response associated with non-evidenced prefix")
@@ -129,15 +161,63 @@ elif scenario == "dns":
     expect(all(e.get("reachability") == "unknown" for e in fwd + ptr), "DNS promoted to reachability")
     dns_ops = finished[0]["details"]["coverage"]["operations_by_method"].get("dns", 0) if finished else 0
     expect(dns_ops <= 4, "DNS budget exceeded: %d" % dns_ops)
-elif scenario == "epoch":
+elif scenario in ("epoch", "epoch-notify"):
     epochs = [e for e in events if e["type"] == "routing_epoch"]
     expect(len(epochs) >= 1, "route removal did not start a routing epoch")
     expect(not probe("10.40.0.5", "connected"), "probed via a removed route")
+    watch = [e for e in events if e["type"] == "capability" and e.get("source") == "topology_watch"]
+    expect(watch and watch[0]["details"]["detection"] == "notification_and_polling", "rtnetlink notifications unavailable")
+    if scenario == "epoch-notify":
+        expect(epochs and epochs[0]["details"]["detection"] == "notification", "epoch not detected by notification: %r" % [e["details"].get("detection") for e in epochs])
 elif scenario == "passive":
     expect(not any(e["type"] == "operation_reserved" for e in events), "passive run reserved operations")
+elif scenario in ("estate", "estate-wan"):
+    responders = {e["address"] for e in obs if e.get("source") == "probe" and e.get("reachability") == "endpoint_response"}
+    wanted = {"10.100.%d.10" % n for n in range(100)}
+    missing = sorted(wanted - responders)
+    elapsed = finished[0]["details"]["elapsed_ms"] / 1000 if finished else 0
+    cov = finished[0]["details"]["coverage"] if finished else {}
+    print("  %s: %d/100 prefixes detected in %.1fs, %d operations, responding prefixes %s" % (scenario, len(wanted & responders), elapsed, ops, cov.get("prefixes_with_responding_target")))
+    expect(elapsed <= 120, "estate exceeded the 120-second profile: %.1fs" % elapsed)
+    if scenario == "estate":
+        expect(not missing, "undetected seeds %r" % missing)
+    else:
+        # Loss can defeat both echo and the TCP fallback; each miss must be
+        # explained by silence (timeouts), never by a skipped target.
+        silent = {e["address"] for e in obs if e.get("source") == "probe" and e.get("outcome") == "timeout"}
+        expect(len(missing) <= 5, "too many undetected seeds under WAN loss: %r" % missing)
+        expect(set(missing) <= silent, "undetected seeds were never probed: %r" % sorted(set(missing) - silent))
 if fail:
     print("FAIL", scenario, "\n  " + "\n  ".join(fail)); sys.exit(1)
 print("PASS", scenario, "operations=%d" % ops)
+PY
+}
+
+# paris asserts that hop-limited echo requests (TTL below 16) to the trace
+# target share one identifier and checksum on the wire.
+paris() {
+	python3 - "$1" <<'PY'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+if len(data) < 24:
+    print("FAIL paris: empty capture"); sys.exit(1)
+link = struct.unpack("<I", data[20:24])[0]
+off, flows, probes = 24, set(), 0
+while off + 16 <= len(data):
+    incl = struct.unpack("<I", data[off + 8:off + 12])[0]
+    pkt = data[off + 16:off + 16 + incl]
+    off += 16 + incl
+    ip = pkt[14:] if link == 1 else pkt
+    if len(ip) < 28 or ip[0] >> 4 != 4 or ip[9] != 1:
+        continue
+    ihl = (ip[0] & 15) * 4
+    icmp = ip[ihl:]
+    if ip[16:20] == bytes([10, 30, 0, 9]) and ip[8] < 16 and icmp[0] == 8:
+        probes += 1
+        flows.add(icmp[2:6])
+if probes < 2 or len(flows) != 1:
+    print("FAIL paris: %d trace probes on %d flows" % (probes, len(flows))); sys.exit(1)
+print("PASS paris: %d trace probes on one flow" % probes)
 PY
 }
 
@@ -153,9 +233,14 @@ check "$work/passive.jsonl" passive
 # is mapped, so the range cannot be disabled again once enabled.
 for backend in raw ping; do
 	if [ $backend = ping ]; then echo "0 0" > /proc/sys/net/ipv4/ping_group_range; fi
+	# Capture on the vantage link so the trace's flow identifiers are checked on the wire.
+	tcpdump --immediate-mode -Z root -U -n -i h0 -w - icmp > "$work/trace-$backend.pcap" 2>"$work/tcpdump-$backend.err" & cap=$!
+	sleep 0.5
 	run "validate-$backend" --active --include 10.0.0.0/8 --seeds "$work/seeds.txt" --tcp-port 8443 --trace 1 --max-operations 20 --dns-budget 0 --rate 50 --timeout 500ms
+	sleep 0.3; kill -INT $cap; wait $cap 2>/dev/null || true
 	grep -o '"backend":"[a-z_0-9]*"' "$work/validate-$backend.jsonl" | sort -u | tr '\n' ' '; echo
 	check "$work/validate-$backend.jsonl" validate
+	paris "$work/trace-$backend.pcap"
 done
 
 printf 'app.corp.example\nother.test\n' > "$work/names.txt"
@@ -166,3 +251,67 @@ check "$work/dns.jsonl" dns
 ( sleep 1.2; ip route del 10.40.0.0/24 ) &
 run epoch --active --include 10.0.0.0/8 --seeds "$work/seeds.txt" --sample-per-prefix 3 --tcp-port 8443 --rate 1 --max-operations 20 --dns-budget 0 --refresh-interval 500ms --timeout 300ms
 check "$work/epoch.jsonl" epoch
+
+# The same change with a one-minute poll: only rtnetlink can detect it in time.
+ip route add 10.40.0.0/24 via 10.10.0.2
+( sleep 1.2; ip route del 10.40.0.0/24 ) &
+run epoch-notify --active --include 10.0.0.0/8 --seeds "$work/seeds.txt" --sample-per-prefix 3 --tcp-port 8443 --rate 1 --max-operations 20 --dns-budget 0 --refresh-interval 60s --timeout 300ms
+check "$work/epoch-notify.jsonl" epoch-notify
+
+# Wire check: a passive run sends nothing (IPv4 or ARP) from the vantage.
+tcpdump --immediate-mode -Z root -U -n -i any -w - "arp or (ip and not dst host 127.0.0.1)" > "$work/passive.pcap" 2>/dev/null & cap=$!
+sleep 0.5
+run passive-wire --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv"
+sleep 0.3
+# Positive control: the capture must see this ping, or zero proves nothing.
+ping -c 1 -W 1 10.50.0.2 > /dev/null
+sleep 0.3; kill -INT $cap; wait $cap 2>/dev/null || true
+packets=$(tcpdump -Z root -n -r "$work/passive.pcap" 2>/dev/null | grep -c "^[0-9][0-9]:")
+control=$(tcpdump -Z root -n -r "$work/passive.pcap" "icmp and dst host 10.50.0.2" 2>/dev/null | wc -l)
+if [ "$control" -lt 1 ]; then echo "FAIL passive-wire: capture missed the control ping"; exit 1; fi
+if [ "$packets" -ne $((control * 2)) ] && [ "$packets" -ne "$control" ]; then echo "FAIL passive-wire: $packets packets"; tcpdump -Z root -n -r "$work/passive.pcap" | head; exit 1; fi
+echo "PASS passive-wire: no packets besides the control ping"
+
+# Acceptance: 100 known prefixes, one responsive seed each, default profile.
+tcpdump --immediate-mode -Z root -U -n -i h1 -w - "ip or arp" > "$work/estate.pcap" 2>/dev/null & cap=$!
+sleep 0.5
+run estate --active --include 10.100.0.0/16 --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv"
+sleep 0.3; kill -INT $cap; wait $cap 2>/dev/null || true
+check "$work/estate.jsonl" estate
+sent=$(tcpdump -Z root -n -r "$work/estate.pcap" src host 10.50.0.1 2>/dev/null | wc -l)
+echo "  estate wire: $sent packets sent by the vantage (application operations are not packets)"
+
+# The same estate over a lossy, high-latency link, when netem is available.
+if tc qdisc add dev h1 root netem delay 80ms loss 2% 2>/dev/null && at "$est" tc qdisc add dev e0 root netem delay 80ms loss 2% 2>/dev/null; then
+	run estate-wan --active --include 10.100.0.0/16 --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv"
+	check "$work/estate-wan.jsonl" estate-wan
+	tc qdisc del dev h1 root; at "$est" tc qdisc del dev e0 root
+else
+	echo "SKIP estate-wan (netem unavailable)"
+fi
+
+# Fault injection: the journal fills a 64 KiB filesystem mid-run. The run must
+# fail promptly and loudly, and every complete record must stay readable.
+mkdir -p "$work/full"
+set +e
+unshare -m sh -c 'mount -t tmpfs -o size=64k tmpfs "$1" || exit 99; "$2" discover --journal "$1/j.jsonl" --realm lab --seeds "$3" --inventory "$4" --format jsonl; c=$?; cp "$1/j.jsonl" "$5"; exit $c' sh "$work/full" "$bin" "$work/estate-seeds.txt" "$work/estate.csv" "$work/full.jsonl" > "$work/full.out" 2> "$work/full.err"
+code=$?
+"$bin" export --journal "$work/full.jsonl" --format jsonl > "$work/full-export.jsonl" 2> "$work/full-export.err"
+exported=$?
+set -e
+streamed=$(grep -c . "$work/full.out"); recovered=$(grep -c . "$work/full-export.jsonl")
+if [ $code -ne 1 ] || ! grep -q "no space left on device" "$work/full.err"; then echo "FAIL disk-full: exit $code"; cat "$work/full.err"; exit 1; fi
+# Export reports the incomplete run (exit 3); every streamed record must have
+# been journaled first, so none is missing from the recovered journal.
+if [ $exported -ne 3 ] || [ "$recovered" -lt "$streamed" ]; then echo "FAIL disk-full recovery: export exit $exported, $recovered recovered < $streamed streamed"; cat "$work/full-export.err"; exit 1; fi
+echo "PASS disk-full exit=$code, $recovered complete records recovered, $streamed streamed"
+
+# Broken pipe: the reader goes away after one record; the run must stop
+# promptly with an error rather than continue writing into the void.
+set +e
+start=$(date +%s)
+( "$bin" discover --no-journal --realm lab --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv" --format jsonl 2> "$work/pipe.err"; echo $? > "$work/pipe.code" ) | head -n 1 > /dev/null
+set -e
+code=$(cat "$work/pipe.code"); took=$(( $(date +%s) - start ))
+if [ "$code" -eq 0 ] || [ $took -gt 10 ]; then echo "FAIL broken-pipe: exit $code after ${took}s"; cat "$work/pipe.err"; exit 1; fi
+echo "PASS broken-pipe exit=$code"

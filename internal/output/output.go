@@ -90,7 +90,10 @@ func (r *Renderer) Write(e model.Event) error {
 		}
 		switch e.Type {
 		case "routing_epoch":
-			_, err := fmt.Fprintf(r.writer, "routing_epoch %d reason=%v\n", e.RoutingEpoch, e.Details["reason"])
+			_, err := fmt.Fprintf(r.writer, "routing_epoch %d reason=%v detection=%v\n", e.RoutingEpoch, e.Details["reason"], e.Details["detection"])
+			return err
+		case "resolver_change":
+			_, err := fmt.Fprintf(r.writer, "resolver_change detection=%v\n", e.Details["detection"])
 			return err
 		case "trace_finished":
 			_, err := fmt.Fprintf(r.writer, "trace %s stop=%s hops=%v\n", strconv.QuoteToASCII(e.Address), e.Outcome, e.Details["hops_sent"])

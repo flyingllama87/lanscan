@@ -155,3 +155,82 @@ func TestUnavailableEchoReservesNoBudget(t *testing.T) {
 		t.Fatalf("%+v %v %v", summary, protocols, err)
 	}
 }
+
+func TestRetryOnlySilentTargetsAfterFirstAttempts(t *testing.T) {
+	r := fakeRunner()
+	r.Config.Retry, r.Config.MaxOperations = 1, 100
+	silent, refused, flaky := netip.MustParseAddr("10.1.1.1"), netip.MustParseAddr("10.1.1.2"), netip.MustParseAddr("10.1.1.3")
+	var mu sync.Mutex
+	var order []string
+	echoes := map[netip.Addr]int{}
+	r.Echo = func(_ context.Context, a netip.Addr, _ platform.Route, _ int) probe.Result {
+		mu.Lock()
+		defer mu.Unlock()
+		echoes[a]++
+		order = append(order, "echo:"+a.String())
+		if a == flaky && echoes[a] == 2 {
+			return probe.Result{Outcome: "echo_reply", Response: true}
+		}
+		return probe.Result{Outcome: "timeout"}
+	}
+	r.TCP = func(_ context.Context, a netip.Addr, _ platform.Route, _ int) probe.Result {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, "tcp:"+a.String())
+		if a == refused {
+			return probe.Result{Outcome: "path_unreachable"}
+		}
+		return probe.Result{Outcome: "timeout"}
+	}
+	var retried []string
+	r.Emit = func(e model.Event) error {
+		if e.Type == "observation" && e.Details["retry"] == true {
+			mu.Lock()
+			retried = append(retried, e.Address)
+			mu.Unlock()
+		}
+		return nil
+	}
+	r.Config.Concurrency = 1
+	cands := []discover.Candidate{{Address: silent}, {Address: refused}, {Address: flaky}}
+	summary, err := r.Run(context.Background(), cands)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First attempts (echo, tcp) for all three, then one echo retry for the
+	// two silent targets; the path_unreachable target is not retried.
+	if len(order) != 8 || order[6] != "echo:10.1.1.1" || order[7] != "echo:10.1.1.3" {
+		t.Fatalf("order %v", order)
+	}
+	if summary.Retried != 2 || summary.Responded != 1 || summary.Operations != 8 || len(retried) != 2 {
+		t.Fatalf("%+v retried=%v", summary, retried)
+	}
+}
+
+func TestRetryDisabledByDefault(t *testing.T) {
+	r := fakeRunner()
+	r.TCP = func(context.Context, netip.Addr, platform.Route, int) probe.Result {
+		return probe.Result{Outcome: "timeout"}
+	}
+	summary, err := r.Run(context.Background(), candidates(2))
+	if err != nil || summary.Retried != 0 || summary.Operations != 4 {
+		t.Fatalf("%+v %v", summary, err)
+	}
+}
+
+func TestBreadthFirstRoundRobinsInterfaces(t *testing.T) {
+	var cands []discover.Candidate
+	for i := range 4 {
+		p := netip.PrefixFrom(netip.AddrFrom4([4]byte{10, byte(i), 0, 0}), 16)
+		cands = append(cands, discover.Candidate{Address: p.Addr().Next(), Prefix: &p, InterfaceID: "eth0"})
+	}
+	p := netip.MustParsePrefix("192.168.1.0/24")
+	cands = append(cands, discover.Candidate{Address: netip.MustParseAddr("192.168.1.5"), Prefix: &p, InterfaceID: "wg0"})
+	var got []string
+	for _, c := range breadthFirst(cands) {
+		got = append(got, c.InterfaceID)
+	}
+	if got[0] != "eth0" || got[1] != "wg0" {
+		t.Fatalf("wg0 waited behind eth0: %v", got)
+	}
+}

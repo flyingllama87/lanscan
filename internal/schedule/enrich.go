@@ -12,6 +12,7 @@ import (
 	"lanscan/internal/importer"
 	"lanscan/internal/model"
 	"lanscan/internal/platform"
+	"lanscan/internal/probe"
 )
 
 const (
@@ -30,6 +31,9 @@ type Resolver interface {
 // DNSContext records which resolver policy produced naming evidence.
 type DNSContext struct {
 	Resolver Resolver
+	// Annotate adds platform policy for a query name, such as the matching
+	// Windows NRPT rule. Nil adds nothing.
+	Annotate func(queryName string) map[string]any
 	// Policy is "system" (platform policy, upstream unknown) or "explicit".
 	Policy   string
 	Server   string
@@ -63,8 +67,13 @@ func dnsOutcome(err error) string {
 	return "error"
 }
 
-func (d DNSContext) details(operationID, query string) map[string]any {
+func (d DNSContext) details(operationID, query, queryName string) map[string]any {
 	m := map[string]any{"operation_id": operationID, "query": query, "resolver_policy": d.Policy, "accounting": "one native lookup; resolver retries and recursion are opaque"}
+	if d.Annotate != nil {
+		for k, v := range d.Annotate(queryName) {
+			m[k] = v
+		}
+	}
 	if d.Server != "" {
 		m["resolver"] = d.Server
 	} else {
@@ -162,7 +171,7 @@ func (r *Runner) lookupForward(ctx context.Context, dns DNSContext, name, family
 	// A trailing dot prevents search-list expansion outside approved names.
 	addrs, lookupErr := dns.Resolver.LookupNetIP(opCtx, family, strings.TrimSuffix(name, ".")+".")
 	cancel()
-	details := dns.details(operationID, query)
+	details := dns.details(operationID, query, strings.TrimSuffix(name, ".")+".")
 	if derivedFrom != "" {
 		details["derived_from_ptr"] = derivedFrom
 	}
@@ -218,7 +227,7 @@ func (r *Runner) Reverse(ctx context.Context, dns DNSContext, targets []netip.Ad
 		opCtx, cancel := context.WithTimeout(ctx, r.Config.Timeout*2)
 		names, lookupErr := dns.Resolver.LookupAddr(opCtx, target.WithZone("").String())
 		cancel()
-		details := dns.details(operationID, "PTR")
+		details := dns.details(operationID, "PTR", platform.ReverseName(target))
 		if lookupErr != nil {
 			details["error"] = lookupErr.Error()
 			return r.Emit(model.Event{Type: "observation", Source: "dns_reverse", Address: target.String(), Outcome: dnsOutcome(lookupErr), ObservedAt: model.Now(), Details: details})
@@ -315,11 +324,19 @@ func (r *Runner) Trace(ctx context.Context, targets []TraceTarget, maxHops int) 
 	}
 	r.init()
 	for _, t := range targets {
-		stop, hops, err := r.traceOne(ctx, t, maxHops)
+		flow, err := probe.NewFlow()
+		if err != nil {
+			return err
+		}
+		stop, hops, stable, err := r.traceOne(ctx, t, maxHops, flow)
 		if err != nil && !stopError(err) {
 			return err
 		}
-		finished := model.Event{Type: "trace_finished", Address: t.Target.String(), InterfaceID: t.Route.Interface, SourceAddress: t.Route.Source.String(), Outcome: stop, ObservedAt: model.Now(), Details: map[string]any{"hops_sent": hops, "selection": t.Reason, "path_model": "hop-limited ICMP echo; ECMP, tunnels and asymmetric paths may hide or reorder hops"}}
+		pathModel := "hop-limited ICMP echo; ECMP, tunnels and asymmetric paths may hide or reorder hops"
+		if stable {
+			pathModel = "Paris-style hop-limited ICMP echo: constant identifier and checksum keep per-flow ECMP on one path; per-packet balancing, tunnels and asymmetric return paths may still hide or reorder hops"
+		}
+		finished := model.Event{Type: "trace_finished", Address: t.Target.String(), InterfaceID: t.Route.Interface, SourceAddress: t.Route.Source.String(), Outcome: stop, ObservedAt: model.Now(), Details: map[string]any{"hops_sent": hops, "selection": t.Reason, "flow_stable": stable, "path_model": pathModel}}
 		if emitErr := r.Emit(finished); emitErr != nil {
 			return emitErr
 		}
@@ -330,34 +347,45 @@ func (r *Runner) Trace(ctx context.Context, targets []TraceTarget, maxHops int) 
 	return nil
 }
 
-func (r *Runner) traceOne(ctx context.Context, t TraceTarget, maxHops int) (string, int, error) {
+// traceOne probes successive hops on one flow. The returned bool reports
+// whether every sent probe held the flow's identifiers.
+func (r *Runner) traceOne(ctx context.Context, t TraceTarget, maxHops int, flow probe.Flow) (string, int, bool, error) {
 	silent := 0
+	stable := true
+	sent := false
 	path := t.Route.Interface + "/" + t.Route.Gateway.String()
 	for hop := 1; hop <= maxHops; hop++ {
 		operationID, err := model.NewRunID()
 		if err != nil {
-			return "local_error", hop - 1, err
+			return "local_error", hop - 1, stable && sent, err
 		}
 		e := model.Event{Protocol: "trace", Address: t.Target.String(), SourceAddress: t.Route.Source.String(), InterfaceID: t.Route.Interface, Details: map[string]any{"operation_id": operationID, "hop_limit": hop}}
 		if err := r.operation(ctx, "trace", path, e); err != nil {
 			if errors.Is(err, ErrBudget) || errors.Is(err, ErrEnrichmentBudget) {
-				return "budget_exhausted", hop - 1, err
+				return "budget_exhausted", hop - 1, stable && sent, err
 			}
-			return "interrupted", hop - 1, err
+			return "interrupted", hop - 1, stable && sent, err
 		}
 		fresh, err := r.Lookup(t.Target, r.Config.Source, r.Config.Interface)
 		if err != nil || fresh != t.Route {
 			if emitErr := r.Emit(model.Event{Type: "observation", Source: "route_lookup", Address: t.Target.String(), Outcome: "route_changed", ObservedAt: model.Now(), Details: map[string]any{"operation_id": operationID}}); emitErr != nil {
-				return "local_error", hop, emitErr
+				return "local_error", hop, stable && sent, emitErr
 			}
-			return "route_changed", hop, nil
+			return "route_changed", hop, stable && sent, nil
 		}
 		opCtx, cancel := context.WithTimeout(ctx, r.timeout(path))
-		res := r.Echo(opCtx, t.Target, t.Route, hop)
+		res := r.EchoFlow(opCtx, t.Target, t.Route, hop, flow)
 		cancel()
+		sent = true
+		if res.Flow != probe.FlowParis {
+			stable = false
+		}
 		ev := model.Event{Type: "observation", Source: "trace", SourceAddress: t.Route.Source.String(), InterfaceID: t.Route.Interface, Outcome: res.Outcome, Reachability: "unknown", ObservedAt: model.Now(), Details: map[string]any{"operation_id": operationID, "trace_target": t.Target.String(), "hop_limit": hop, "backend": res.Backend, "rtt_ns": res.RTT.Nanoseconds(), "icmp_type": res.ICMPType, "icmp_code": res.ICMPCode, "error": res.Error}}
 		if res.Correlation != "" {
 			ev.Details["correlation"] = res.Correlation
+		}
+		if res.Flow != "" {
+			ev.Details["flow"] = res.Flow
 		}
 		if res.Status != 0 {
 			ev.Details["native_status"] = res.Status
@@ -374,23 +402,23 @@ func (r *Runner) traceOne(ctx context.Context, t TraceTarget, maxHops int) (stri
 			ev.ActivityBasis = "active_response"
 		}
 		if err := r.Emit(ev); err != nil {
-			return "local_error", hop, err
+			return "local_error", hop, stable && sent, err
 		}
 		switch {
 		case res.Response:
-			return "destination_reached", hop, nil
+			return "destination_reached", hop, stable && sent, nil
 		case res.Outcome == "path_unreachable" || res.Outcome == "administratively_prohibited":
-			return "terminal_failure", hop, nil
+			return "terminal_failure", hop, stable && sent, nil
 		case res.Outcome == "unavailable" || res.Outcome == "local_error" || res.Outcome == "send_error":
-			return "backend_unavailable", hop, nil
+			return "backend_unavailable", hop, stable && sent, nil
 		case res.Outcome == "time_exceeded":
 			silent = 0
 		default:
 			silent++
 			if silent >= 3 {
-				return "silent_hops", hop, nil
+				return "silent_hops", hop, stable && sent, nil
 			}
 		}
 	}
-	return "hop_limit", maxHops, nil
+	return "hop_limit", maxHops, stable && sent, nil
 }

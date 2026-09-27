@@ -1,15 +1,24 @@
-VERSION ?= 0.1.0
+GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
+VERSION ?= $(if $(GIT_VERSION),$(GIT_VERSION),development)
 BUILDDIR ?= build
+DISTDIR ?= dist
+TOOLDIR ?= $(BUILDDIR)/tools
 BINDIR ?= /usr/local/bin
 GO_INSTALL_DIR ?= /usr/local
 GO_VERSION ?=
 GOOS ?= $(shell go env GOOS 2>/dev/null || uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH ?= $(shell go env GOARCH 2>/dev/null || uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/' -e 's/i[3-6]86/386/' -e 's/armv7l/armv6l/')
-DATE = $(shell date -u +%Y%m%d)
+FUZZTIME ?= 20s
+STATICCHECK_VERSION ?= v0.8.1
+GOVULNCHECK_VERSION ?= v1.8.0
 
 BIN_EXT := $(if $(filter windows,$(GOOS)),.exe,)
 BIN_NAME := lanscan$(BIN_EXT)
 BINARY := $(BUILDDIR)/$(BIN_NAME)
+RELEASE_NAME := lanscan-$(VERSION)-$(GOOS)-$(GOARCH)
+RELEASE_PLATFORMS := linux/amd64 linux/arm64 linux/386 windows/amd64 windows/arm64
+STATICCHECK := $(TOOLDIR)/staticcheck
+GOVULNCHECK := $(TOOLDIR)/govulncheck
 
 # Terminal color support (disabled if NO_COLOR is set)
 ifeq ($(NO_COLOR),)
@@ -31,20 +40,28 @@ help:
 	@printf "  $(CYAN)%-16s$(RESET) %s\n" "build" "Build the lanscan binary ($(BUILDDIR)/lanscan)"
 	@printf "  $(CYAN)%-16s$(RESET) %s\n" "install" "Install binary to BINDIR (default: $(BINDIR))"
 	@printf "  $(CYAN)%-16s$(RESET) %s\n" "uninstall" "Remove binary from BINDIR"
-	@printf "  $(CYAN)%-16s$(RESET) %s\n" "clean" "Remove build artifacts ($(BUILDDIR)/*)"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n" "clean" "Remove build and release artifacts"
 	@printf "  $(CYAN)%-16s$(RESET) %s\n" "deps" "Download Go dependencies"
 	@printf "  $(CYAN)%-16s$(RESET) %s\n\n" "install-go" "Download and install latest Go to GO_INSTALL_DIR"
-	@printf "$(BOLD)Testing Targets:$(RESET)\n"
-	@printf "  $(CYAN)%-16s$(RESET) %s\n\n" "test" "Run tests with race detection"
+	@printf "$(BOLD)Quality Targets:$(RESET)\n"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n" "check" "Run vet, lint and test (what CI runs first)"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n" "test" "Run tests with race detection"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n" "vet" "Run go vet for Linux and Windows"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n" "lint" "Run gofmt and staticcheck for Linux and Windows"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n" "vuln" "Run govulncheck"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n" "fuzz" "Run each fuzz target for FUZZTIME (current: $(FUZZTIME))"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n" "bench" "Run benchmarks"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n\n" "lab" "Run the namespace lab end to end (Linux; needs unprivileged userns)"
 	@printf "$(BOLD)Packaging & Release Targets:$(RESET)\n"
-	@printf "  $(CYAN)%-16s$(RESET) %s\n" "release" "Create release tarball for current platform ($(GOOS)/$(GOARCH))"
-	@printf "  $(CYAN)%-16s$(RESET) %s\n\n" "release-all" "Build release tarballs for all platforms"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n" "release" "Create $(DISTDIR)/$(RELEASE_NAME).tar.gz"
+	@printf "  $(CYAN)%-16s$(RESET) %s\n\n" "release-all" "Build release tarballs for all platforms plus SHA256SUMS"
 	@printf "$(BOLD)Help Targets:$(RESET)\n"
 	@printf "  $(CYAN)%-16s$(RESET) %s\n\n" "help" "Display this list of options (default)"
 	@printf "$(BOLD)Configurable Variables$(RESET) (e.g. make install BINDIR=~/.local/bin):\n"
 	@printf "  %-16s %s\n" "BINDIR" "Installation directory (current: $(BINDIR))"
 	@printf "  %-16s %s\n" "BUILDDIR" "Build output directory (current: $(BUILDDIR))"
-	@printf "  %-16s %s\n" "VERSION" "Version string (current: $(VERSION))"
+	@printf "  %-16s %s\n" "DISTDIR" "Release output directory (current: $(DISTDIR))"
+	@printf "  %-16s %s\n" "VERSION" "Version string (current: $(VERSION); from git describe)"
 	@printf "  %-16s %s\n" "GOOS" "Target operating system (current: $(GOOS))"
 	@printf "  %-16s %s\n" "GOARCH" "Target architecture (current: $(GOARCH))"
 	@printf "  %-16s %s\n" "GO_INSTALL_DIR" "Go installation directory (current: $(GO_INSTALL_DIR))"
@@ -55,33 +72,77 @@ build: $(BINARY)
 
 .PHONY: clean
 clean:
-	rm -f $(BUILDDIR)/*
+	rm -rf $(BUILDDIR) $(DISTDIR)
 
 .PHONY: deps
 deps:
 	go mod download
 
-$(BINARY): deps
+# Always rebuild: the Go build cache makes this cheap and tracks sources itself.
+.PHONY: $(BINARY)
+$(BINARY):
 	@mkdir -p $(BUILDDIR)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '-extldflags "-static" -X main.version=$(VERSION) -X lanscan/internal/app.Version=$(VERSION)' -o $(BINARY) ./cmd/lanscan
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags '-s -w -X main.version=$(VERSION)' -o $(BINARY) ./cmd/lanscan
 
 .PHONY: release
 release:
-	$(MAKE) clean
-	$(MAKE) build
-	tar -zcf lanscan-$(GOOS)-$(GOARCH)-v$(VERSION).tar.gz -C $(BUILDDIR) .
+	@mkdir -p $(DISTDIR)/$(RELEASE_NAME)
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags '-s -w -X main.version=$(VERSION)' -o $(DISTDIR)/$(RELEASE_NAME)/$(BIN_NAME) ./cmd/lanscan
+	cp README.md $(DISTDIR)/$(RELEASE_NAME)/
+	tar -zcf $(DISTDIR)/$(RELEASE_NAME).tar.gz -C $(DISTDIR) $(RELEASE_NAME)
+	rm -rf $(DISTDIR)/$(RELEASE_NAME)
 
 .PHONY: release-all
 release-all:
-	$(MAKE) release GOOS=linux GOARCH=amd64
-	$(MAKE) release GOOS=linux GOARCH=arm64
-	$(MAKE) release GOOS=linux GOARCH=386
-	$(MAKE) release GOOS=windows GOARCH=amd64
-	$(MAKE) release GOOS=windows GOARCH=arm64
+	rm -rf $(DISTDIR)
+	@set -e; for p in $(RELEASE_PLATFORMS); do \
+		$(MAKE) --no-print-directory release GOOS=$${p%/*} GOARCH=$${p#*/}; \
+	done
+	cd $(DISTDIR) && sha256sum lanscan-*.tar.gz > SHA256SUMS
+
+.PHONY: check
+check: vet lint test
 
 .PHONY: test
 test:
 	go test -race ./...
+
+.PHONY: vet
+vet:
+	GOOS=linux go vet ./...
+	GOOS=windows go vet ./...
+
+$(STATICCHECK):
+	GOOS= GOARCH= GOBIN=$(abspath $(TOOLDIR)) go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
+
+$(GOVULNCHECK):
+	GOOS= GOARCH= GOBIN=$(abspath $(TOOLDIR)) go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+
+.PHONY: lint
+lint: $(STATICCHECK)
+	@unformatted=$$(gofmt -l .); if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
+	GOOS=linux $(STATICCHECK) ./...
+	GOOS=windows $(STATICCHECK) ./...
+
+.PHONY: vuln
+vuln: $(GOVULNCHECK)
+	$(GOVULNCHECK) ./...
+
+.PHONY: fuzz
+fuzz:
+	go test -run XXX -fuzz FuzzReplay -fuzztime $(FUZZTIME) ./internal/journal
+	go test -run XXX -fuzz FuzzImports -fuzztime $(FUZZTIME) ./internal/importer
+	go test -run XXX -fuzz FuzzCacheParsers -fuzztime $(FUZZTIME) ./internal/platform
+	go test -run XXX -fuzz FuzzICMPQuote -fuzztime $(FUZZTIME) ./internal/probe
+	go test -run XXX -fuzz FuzzErrorQueue -fuzztime $(FUZZTIME) ./internal/probe
+
+.PHONY: bench
+bench:
+	go test -run XXX -bench . -benchmem ./...
+
+.PHONY: lab
+lab:
+	./scripts/netns-lab.sh
 
 .PHONY: install
 install: build
