@@ -48,11 +48,13 @@ type Reducer struct {
 	// unicast records prefixes backed by at least one unicast route, so that
 	// sampling never targets blackhole, reject, local or broadcast routes.
 	unicast map[string]bool
-	index   prefixIndex
+	// own holds this host's addresses per realm; they are never targets.
+	own   map[string]bool
+	index prefixIndex
 }
 
 func NewReducer(limit int) *Reducer {
-	return &Reducer{Limit: limit, Findings: make(map[string]Finding), Candidates: make(map[string]Candidate), Prefixes: make(map[string]model.Event), entities: make(map[string]int), unicast: make(map[string]bool)}
+	return &Reducer{Limit: limit, Findings: make(map[string]Finding), Candidates: make(map[string]Candidate), Prefixes: make(map[string]model.Event), entities: make(map[string]int), unicast: make(map[string]bool), own: make(map[string]bool)}
 }
 
 // Observe returns a derived finding without inventing boundaries. The caller
@@ -133,6 +135,11 @@ func (r *Reducer) Commit(f model.Event) {
 		r.index.add(*f.Prefix, key)
 	}
 	// This host's own addresses are neither targets nor evidence of other hosts.
+	if f.Address != "" && f.Source == "interfaces" {
+		if a, err := netip.ParseAddr(f.Address); err == nil {
+			r.own[f.RealmID+"\x00"+a.Unmap().String()] = true
+		}
+	}
 	if f.Address != "" && f.Source != "interfaces" {
 		a, err := netip.ParseAddr(f.Address)
 		if err != nil {
@@ -237,7 +244,7 @@ func (r *Reducer) samples(s Scope, realm string, evidence []Candidate, seen map[
 				skipped["sample_"+reason]++
 				continue
 			}
-			if seen[a.String()] {
+			if seen[a.String()] || r.own[realm+"\x00"+a.String()] {
 				continue
 			}
 			seen[a.String()] = true
@@ -300,7 +307,7 @@ func (r *Reducer) neighbours(s Scope, realm string, seen map[string]bool, skippe
 				v := uint32(start)
 				sibling := netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}), p.Bits())
 				a := SampleAddresses(sibling, 1)[0]
-				if seen[a.String()] {
+				if seen[a.String()] || r.own[realm+"\x00"+a.String()] {
 					continue
 				}
 				known := false

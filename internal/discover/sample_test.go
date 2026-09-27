@@ -159,3 +159,18 @@ func TestNeighbourGuessesRespectScope(t *testing.T) {
 		t.Fatalf("%v %v", candidates, skipped)
 	}
 }
+
+func TestOwnAddressesAreNeverTargets(t *testing.T) {
+	r := NewReducer(100)
+	lan := netip.MustParsePrefix("172.17.0.0/16")
+	observe(t, r, 1, model.Event{Source: "interfaces", Prefix: &lan, PrefixBasis: "interface", Address: "172.17.0.1"})
+	candidates, _ := r.Plan(Scope{Include: []netip.Prefix{lan}, SamplePerPrefix: 3}, "corp")
+	var got []string
+	for _, c := range candidates {
+		got = append(got, c.Address.String())
+	}
+	// The first usable address is this host's, so only the others are sampled.
+	if !reflect.DeepEqual(got, []string{"172.17.255.254", "172.17.128.0"}) {
+		t.Fatal(got)
+	}
+}
