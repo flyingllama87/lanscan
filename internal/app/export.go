@@ -15,19 +15,47 @@ import (
 	"lanscan/internal/output"
 )
 
-func runExport(args []string, stdout, stderr io.Writer) (int, error) {
+type exportOptions struct {
+	path, format, view, output string
+	raw                        bool
+}
+
+func exportFlags(o *exportOptions) *flag.FlagSet {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	path := fs.String("journal", "", "input JSONL journal")
-	format := fs.String("format", "jsonl", "jsonl, csv, or text")
-	view := fs.String("view", "events", "events or latest findings")
-	outputPath := fs.String("output", "", "exclusive output file")
-	raw := fs.Bool("raw-csv", false, "preserve formula-leading text without spreadsheet neutralization")
-	if err := fs.Parse(args); err != nil {
+	fs.StringVar(&o.path, "journal", "", "journal `FILE` to read")
+	fs.StringVar(&o.view, "view", "events", "`VIEW`: events (everything) or latest (current findings only)")
+	fs.StringVar(&o.format, "format", "jsonl", "results `FORMAT`: text, jsonl or csv")
+	fs.StringVar(&o.output, "output", "", "write to this new `FILE` instead of stdout")
+	fs.BoolVar(&o.raw, "raw-csv", false, "keep formula-like text as is instead of neutralizing it for spreadsheets")
+	alias(fs)
+	return fs
+}
+
+var exportPage = helpPage{
+	about: "lanscan export rewrites a journal offline; it sends nothing.",
+	usage: []string{"lanscan export -j <journal.jsonl> [--view events|latest] [-f text|jsonl|csv] [-o <file>]"},
+	examples: [][2]string{
+		{"lanscan export -j scan.jsonl --view latest -f csv -o findings.csv", "current findings as CSV"},
+		{"lanscan export -j scan.jsonl", "every event as JSONL"},
+	},
+	sections: []helpSection{{"FLAGS", []string{"journal", "view", "format", "output", "raw-csv"}}},
+}
+
+func runExport(args []string, stdout, stderr io.Writer) (int, error) {
+	var o exportOptions
+	fs := exportFlags(&o)
+	if err := parseFlags(fs, args, stdout, exportPage); err != nil {
 		return 2, err
 	}
-	if *path == "" || fs.NArg() > 0 || (*view != "events" && *view != "latest") {
-		return 2, errors.New("--journal required; --view must be events or latest")
+	path, format, view, outputPath, raw := &o.path, &o.format, &o.view, &o.output, &o.raw
+	if *path == "" {
+		return 2, usageError{errors.New("--journal is required")}
+	}
+	if fs.NArg() > 0 {
+		return 2, usageError{fmt.Errorf("unexpected argument %q", fs.Arg(0))}
+	}
+	if *view != "events" && *view != "latest" {
+		return 2, usageError{errors.New("--view must be events or latest")}
 	}
 	f, err := os.Open(*path)
 	if err != nil {
@@ -85,12 +113,30 @@ func runExport(args []string, stdout, stderr io.Writer) (int, error) {
 	return 0, nil
 }
 
-func runMerge(args []string, stdout, stderr io.Writer) (int, error) {
+type mergeOptions struct{ format, output string }
+
+func mergeFlags(o *mergeOptions) *flag.FlagSet {
 	fs := flag.NewFlagSet("merge", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	format := fs.String("format", "jsonl", "jsonl, csv, or text")
-	outputPath := fs.String("output", "", "exclusive output file")
-	// Accept the documented command form with options after input paths.
+	fs.StringVar(&o.format, "format", "jsonl", "results `FORMAT`: text, jsonl or csv")
+	fs.StringVar(&o.output, "output", "", "write to this new `FILE` instead of stdout")
+	alias(fs)
+	return fs
+}
+
+var mergePage = helpPage{
+	about: "lanscan merge combines journals from several runs or machines, offline.",
+	usage: []string{"lanscan merge [-f text|jsonl|csv] [-o <file>] <journal.jsonl> <journal.jsonl>..."},
+	examples: [][2]string{
+		{"lanscan merge office-a.jsonl office-b.jsonl -o all.jsonl", "one combined journal"},
+	},
+	sections: []helpSection{{"FLAGS", []string{"format", "output"}}},
+}
+
+func runMerge(args []string, stdout, stderr io.Writer) (int, error) {
+	var o mergeOptions
+	fs := mergeFlags(&o)
+	format, outputPath := &o.format, &o.output
+	// Flags may come before or after the journal paths.
 	var options, inputs []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -98,22 +144,25 @@ func runMerge(args []string, stdout, stderr io.Writer) (int, error) {
 			inputs = append(inputs, args[i+1:]...)
 			break
 		}
-		if strings.HasPrefix(arg, "-") {
-			options = append(options, arg)
-			if (arg == "--format" || arg == "--output" || arg == "-format" || arg == "-output") && i+1 < len(args) {
+		if !strings.HasPrefix(arg, "-") {
+			inputs = append(inputs, arg)
+			continue
+		}
+		options = append(options, arg)
+		name := strings.TrimLeft(arg, "-")
+		if f := fs.Lookup(name); f != nil && !strings.Contains(name, "=") && i+1 < len(args) {
+			if b, ok := f.Value.(interface{ IsBoolFlag() bool }); !ok || !b.IsBoolFlag() {
 				i++
 				options = append(options, args[i])
 			}
-		} else {
-			inputs = append(inputs, arg)
 		}
 	}
-	if err := fs.Parse(append(append(options, "--"), inputs...)); err != nil {
+	if err := parseFlags(fs, append(append(options, "--"), inputs...), stdout, mergePage); err != nil {
 		return 2, err
 	}
 	paths := fs.Args()
 	if len(paths) < 2 {
-		return 2, errors.New("merge requires at least two journals; flags precede paths")
+		return 2, usageError{errors.New("merge needs at least two journals")}
 	}
 	out, closeOut, err := openOutput(*outputPath, stdout)
 	if err != nil {

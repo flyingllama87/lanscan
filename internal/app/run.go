@@ -22,7 +22,7 @@ import (
 )
 
 func runDiscover(parent context.Context, args []string, stdout, stderr io.Writer) (code int, retErr error) {
-	c, err := parseConfig(args, stderr)
+	c, err := parseConfig(args, stdout)
 	if err != nil {
 		return 2, err
 	}
@@ -96,9 +96,6 @@ func discoverConfig(parent context.Context, c config, stdout, stderr io.Writer, 
 			c.Vantage = id
 		}
 	}
-	if !c.NoJournal && c.Journal == "" {
-		c.Journal = "lanscan-" + id + ".jsonl"
-	}
 	out, closeOut, err := openOutput(c.Output, stdout)
 	if err != nil {
 		return 1, err
@@ -114,7 +111,7 @@ func discoverConfig(parent context.Context, c config, stdout, stderr io.Writer, 
 		return 1, err
 	}
 	var j *journal.Writer
-	if !c.NoJournal {
+	if c.Journal != "" {
 		j, err = journal.Create(c.Journal, journal.Options{EveryEvent: c.Sync == "every-event", DiskBudget: c.DiskBudget})
 		if err != nil {
 			return 1, err
@@ -125,7 +122,6 @@ func discoverConfig(parent context.Context, c config, stdout, stderr io.Writer, 
 				retErr = err
 			}
 		}()
-		fmt.Fprintln(stderr, "Journal:", c.Journal)
 	}
 	s := &stream{run: id, realm: c.Realm, vantage: c.Vantage, epoch: 1, journal: j, renderer: renderer, reducer: discover.NewReducer(c.Limit), statuses: make(map[string]string)}
 	if sink != nil {
@@ -400,7 +396,7 @@ func (s *stream) finish(parent, ctx context.Context, c config, runner *schedule.
 	coverage := s.coverage(results, methods, in.candidates)
 	epoch := s.epoch
 	s.mu.Unlock()
-	if err := s.emit(model.Event{Type: "run_finished", ObservedAt: model.Now(), Outcome: reason, Details: map[string]any{"stop_reason": reason, "elapsed_ms": time.Since(in.started).Milliseconds(), "total_elapsed_ns": int64(in.used + time.Since(in.started)), "findings": len(s.reducer.Findings), "known_prefixes": len(s.reducer.Prefixes), "candidate_addresses": len(in.candidates), "synthetic_samples": countSynthetic(in.candidates), "neighbour_guesses": countNeighbours(in.candidates), "intensity": c.Intensity, "untested_candidates": validation.Untried, "capacity_dropped": s.reducer.Dropped, "operations": totalSpent, "segment_operations": validation.Operations, "validation": validation, "collectors": s.statuses, "skipped": in.skips, "coverage": coverage, "routing_epochs": epoch, "journal": !c.NoJournal, "sync": c.Sync, "format": c.Format, "accounting_limitations": accountingLimitations}}); err != nil {
+	if err := s.emit(model.Event{Type: "run_finished", ObservedAt: model.Now(), Outcome: reason, Details: map[string]any{"stop_reason": reason, "elapsed_ms": time.Since(in.started).Milliseconds(), "total_elapsed_ns": int64(in.used + time.Since(in.started)), "findings": len(s.reducer.Findings), "known_prefixes": len(s.reducer.Prefixes), "candidate_addresses": len(in.candidates), "synthetic_samples": countSynthetic(in.candidates), "neighbour_guesses": countNeighbours(in.candidates), "intensity": c.Intensity, "untested_candidates": validation.Untried, "capacity_dropped": s.reducer.Dropped, "operations": totalSpent, "segment_operations": validation.Operations, "validation": validation, "collectors": s.statuses, "skipped": in.skips, "coverage": coverage, "routing_epochs": epoch, "journal": c.Journal != "", "sync": c.Sync, "format": c.Format, "accounting_limitations": accountingLimitations}}); err != nil {
 		return 1, err
 	}
 	if err := s.checkpoint(c); err != nil {

@@ -280,7 +280,7 @@ PY
 
 run() {
 	name=$1; shift
-	"$bin" discover --no-journal --format jsonl --realm lab --vantage ns0 "$@" > "$work/$name.jsonl" 2> "$work/$name.err" || true
+	"$bin" --format jsonl --realm lab --vantage ns0 "$@" > "$work/$name.jsonl" 2> "$work/$name.err" || true
 }
 
 run passive --seeds "$work/seeds.txt"
@@ -348,7 +348,7 @@ check "$work/listen-noipv6.jsonl" listen-noipv6
 # Without CAP_NET_RAW over this network namespace (a nested user namespace
 # does not own it), --listen must fail loudly and create no journal.
 set +e
-unshare -Ur "$bin" discover --listen 1s --journal "$work/nocap.jsonl" > /dev/null 2> "$work/nocap.err"
+unshare -Ur "$bin" --listen 1s --journal "$work/nocap.jsonl" > /dev/null 2> "$work/nocap.err"
 code=$?
 set -e
 if [ $code -eq 1 ] && grep -q CAP_NET_RAW "$work/nocap.err" && [ ! -e "$work/nocap.jsonl" ]; then
@@ -379,7 +379,7 @@ fi
 # fail promptly and loudly, and every complete record must stay readable.
 mkdir -p "$work/full"
 set +e
-unshare -m sh -c 'mount -t tmpfs -o size=64k tmpfs "$1" || exit 99; "$2" discover --journal "$1/j.jsonl" --realm lab --seeds "$3" --inventory "$4" --format jsonl; c=$?; cp "$1/j.jsonl" "$5"; exit $c' sh "$work/full" "$bin" "$work/estate-seeds.txt" "$work/estate.csv" "$work/full.jsonl" > "$work/full.out" 2> "$work/full.err"
+unshare -m sh -c 'mount -t tmpfs -o size=64k tmpfs "$1" || exit 99; "$2" --journal "$1/j.jsonl" --realm lab --seeds "$3" --inventory "$4" --format jsonl; c=$?; cp "$1/j.jsonl" "$5"; exit $c' sh "$work/full" "$bin" "$work/estate-seeds.txt" "$work/estate.csv" "$work/full.jsonl" > "$work/full.out" 2> "$work/full.err"
 code=$?
 "$bin" export --journal "$work/full.jsonl" --format jsonl > "$work/full-export.jsonl" 2> "$work/full-export.err"
 exported=$?
@@ -395,7 +395,7 @@ echo "PASS disk-full exit=$code, $recovered complete records recovered, $streame
 # promptly with an error rather than continue writing into the void.
 set +e
 start=$(date +%s)
-( "$bin" discover --no-journal --realm lab --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv" --format jsonl 2> "$work/pipe.err"; echo $? > "$work/pipe.code" ) | head -n 1 > /dev/null
+( "$bin" --realm lab --seeds "$work/estate-seeds.txt" --inventory "$work/estate.csv" --format jsonl 2> "$work/pipe.err"; echo $? > "$work/pipe.code" ) | head -n 1 > /dev/null
 set -e
 code=$(cat "$work/pipe.code"); took=$(( $(date +%s) - start ))
 if [ "$code" -eq 0 ] || [ $took -gt 10 ]; then echo "FAIL broken-pipe: exit $code after ${took}s"; cat "$work/pipe.err"; exit 1; fi

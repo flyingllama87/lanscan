@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"flag"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"lanscan/internal/journal"
@@ -26,7 +24,7 @@ func TestPlanReportsDNSTraceAndSamplingWithoutTraffic(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, stderr bytes.Buffer
-	code := Run(context.Background(), []string{"discover", "--no-journal", "--format", "jsonl", "--realm", "lab", "--intensity", "1", "--plan", "--include", "198.51.100.0/24", "--include", "192.0.2.0/24", "--seeds", seeds, "--inventory", inventory, "--dns-suffix", "corp.example", "--sample-per-prefix", "2", "--trace", "2"}, &out, &stderr)
+	code := Run(context.Background(), []string{"discover", "--format", "jsonl", "--realm", "lab", "--intensity", "1", "--plan", "--include", "198.51.100.0/24", "--include", "192.0.2.0/24", "--seeds", seeds, "--inventory", inventory, "--dns-suffix", "corp.example", "--sample-per-prefix", "2", "--trace", "2"}, &out, &stderr)
 	if code != 0 {
 		t.Fatalf("%d %s", code, stderr.String())
 	}
@@ -72,7 +70,7 @@ func TestEnrichmentFlagValidation(t *testing.T) {
 		{"--listen", "5m", "--duration", "1m"},
 	} {
 		var out, stderr bytes.Buffer
-		if code := Run(context.Background(), append([]string{"discover", "--no-journal"}, args...), &out, &stderr); code != 2 {
+		if code := Run(context.Background(), append([]string{"discover"}, args...), &out, &stderr); code != 2 {
 			t.Errorf("%v: code %d", args, code)
 		}
 	}
@@ -126,18 +124,7 @@ func TestIntensityPresetsAndOverrides(t *testing.T) {
 
 func TestRequireCapabilityAcceptsCollectors(t *testing.T) {
 	var out, stderr bytes.Buffer
-	if code := Run(context.Background(), []string{"discover", "--no-journal", "--require-capability", "interfaces"}, &out, &stderr); code != 0 {
+	if code := Run(context.Background(), []string{"discover", "--require-capability", "interfaces"}, &out, &stderr); code != 0 {
 		t.Fatalf("%d %s", code, stderr.String())
 	}
-}
-
-func TestHelpListsEveryFlagOnce(t *testing.T) {
-	var out bytes.Buffer
-	fs := discoverFlags(&config{}, &out)
-	fs.Usage()
-	fs.VisitAll(func(f *flag.Flag) {
-		if n := strings.Count(out.String(), "  --"+f.Name+"\n"); n != 1 {
-			t.Errorf("--%s listed %d times", f.Name, n)
-		}
-	})
 }

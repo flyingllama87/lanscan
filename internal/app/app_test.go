@@ -60,7 +60,7 @@ func TestInvalidInputFailsBeforeOutputCreation(t *testing.T) {
 
 func TestRequiredUnavailableCollectorIsPartial(t *testing.T) {
 	var out, stderr bytes.Buffer
-	code := Run(context.Background(), []string{"discover", "--no-journal", "--require-capability", "missing"}, &out, &stderr)
+	code := Run(context.Background(), []string{"discover", "--require-capability", "missing"}, &out, &stderr)
 	if code != 3 {
 		t.Fatalf("%d: %s", code, stderr.String())
 	}

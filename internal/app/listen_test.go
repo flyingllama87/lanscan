@@ -61,7 +61,7 @@ func TestListenEvidenceFeedsPlanning(t *testing.T) {
 	frames := []listen.Frame{arpFrame([4]byte{10, 66, 0, 9}), arpFrame([4]byte{10, 66, 0, 9}), ripFrame()}
 	fakeListen(t, frames, nil)
 	var out, stderr bytes.Buffer
-	code := Run(context.Background(), []string{"discover", "--no-journal", "--format", "jsonl", "--realm", "lab", "--listen", "1s", "--intensity", "2", "--plan", "--include", "10.77.0.0/16"}, &out, &stderr)
+	code := Run(context.Background(), []string{"discover", "--format", "jsonl", "--realm", "lab", "--listen", "1s", "--intensity", "2", "--plan", "--include", "10.77.0.0/16"}, &out, &stderr)
 	if code != 0 {
 		t.Fatalf("%d %s", code, stderr.String())
 	}

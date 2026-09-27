@@ -6,18 +6,18 @@ All commands and flags below are proposed interfaces.
 
 ```sh
 # Local collection: no active DNS, echo, TCP, or trace traffic.
-lanscan discover --format text
+lanscan --format text
 
 # Preview what intensity 2 would probe; sends nothing.
-lanscan discover --intensity 2 --seeds hosts.txt --plan
+lanscan --intensity 2 --seeds hosts.txt --plan
 
 # Bounded validation with a recoverable journal and streamed CSV view.
-lanscan discover --intensity 2 --include 10.20.0.0/16 --exclude 10.20.50.0/24 \
+lanscan --intensity 2 --include 10.20.0.0/16 --exclude 10.20.50.0/24 \
   --seeds hosts.txt --realm corporate --vantage brisbane --journal scan.jsonl \
   --format csv --output findings.csv
 
 # A preset with one advanced override and stronger journal durability.
-lanscan discover --intensity 3 --trace 0 --journal durable.jsonl --sync every-event
+lanscan --intensity 3 --trace 0 --journal durable.jsonl --sync every-event
 
 # Recover after interruption; refresh network context before new work.
 lanscan resume --journal scan.jsonl
@@ -88,7 +88,7 @@ Text prints one useful change per line plus a final coverage summary; no full-sc
 
 ## Streaming and durability
 
-Open and validate output files before active work. By default, create an exclusive journal in the current directory with a generated run ID and print its path to stderr. Fail before probing if that location is unwritable. `--journal` selects another location; `--no-journal` is an explicit streaming-only mode without tool-managed recovery. Do not overwrite existing files; appending to an existing run requires `resume`.
+Open and validate output files before active work. `--journal FILE` creates an exclusive recoverable journal; without it, results only stream to the output. Fail before probing if that location is unwritable. Do not overwrite existing files; appending to an existing run requires `resume`.
 
 Write every event promptly through one writer; flush user-space buffers at each complete record. Derived findings follow their evidence in the journal. CSV and text findings flush on each row/line. Streaming means data is handed to the OS or pipe as produced, not held until scan completion.
 

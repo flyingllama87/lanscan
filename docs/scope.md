@@ -51,7 +51,7 @@ Examples:
 
 ## Scope and traffic policy
 
-Bare `lanscan discover` (intensity 0) performs local collection only. This is a useful zero-probe baseline, including any readable DNS cache. At intensity 1 and above, scope defaults to RFC 1918 and IPv6 ULA space unless `--include` is given; the intensity's target generators, not the scope, bound what is probed. `--plan` shows candidates and budgets without emitting discovery traffic.
+Bare `lanscan` (intensity 0) performs local collection only. This is a useful zero-probe baseline, including any readable DNS cache. At intensity 1 and above, scope defaults to RFC 1918 and IPv6 ULA space unless `--include` is given; the intensity's target generators, not the scope, bound what is probed. `--plan` shows candidates and budgets without emitting discovery traffic.
 
 Route-derived scope (`--scope-from routes`) accepts explicit non-default unicast route prefixes in RFC 1918 or IPv6 ULA space. Other ranges, including organisation-owned public space and shared address space, require explicit inclusion. Do not treat private addressing as proof of ownership. Default routes, including split-default pairs, are not scope grants. Loopback, unspecified, multicast, and IPv4 broadcast destinations are never generated as unicast probes. IPv6 link-local destinations require an interface zone and explicit interface scope.
 

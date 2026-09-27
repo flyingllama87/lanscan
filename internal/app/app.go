@@ -26,35 +26,47 @@ type stringsFlag []string
 func (s *stringsFlag) String() string     { return strings.Join(*s, ",") }
 func (s *stringsFlag) Set(v string) error { *s = append(*s, v); return nil }
 
-// Run returns an exit code without terminating the caller, allowing integration tests.
+// Run returns an exit code without terminating the caller, allowing
+// integration tests. Discovery is the default command.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		usage(stderr)
-		return 2
+	cmd, rest := "discover", args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		cmd, rest = args[0], args[1:]
+	}
+	if len(args) > 0 && (args[0] == "--version" || args[0] == "-version" || args[0] == "-v") {
+		cmd = "version"
 	}
 	var code int
 	var err error
-	switch args[0] {
+	switch cmd {
 	case "discover":
-		code, err = runDiscover(ctx, args[1:], stdout, stderr)
+		code, err = runDiscover(ctx, rest, stdout, stderr)
 	case "export":
-		code, err = runExport(args[1:], stdout, stderr)
+		code, err = runExport(rest, stdout, stderr)
 	case "merge":
-		code, err = runMerge(args[1:], stdout, stderr)
+		code, err = runMerge(rest, stdout, stderr)
 	case "resume":
-		code, err = runResume(ctx, args[1:], stdout, stderr)
-	case "help", "--help", "-h":
-		usage(stdout)
-		return 0
-	case "version", "--version":
+		code, err = runResume(ctx, rest, stdout, stderr)
+	case "help":
+		return runHelp(rest, stdout, stderr)
+	case "version":
 		fmt.Fprintf(stdout, "lanscan %s (schema %d, %s %s/%s)\n", version.String(), model.SchemaVersion, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		return 0
 	default:
-		usage(stderr)
+		fmt.Fprintf(stderr, "lanscan: unknown command %q\nRun 'lanscan --help' for usage.\n", cmd)
 		return 2
 	}
 	if errors.Is(err, flag.ErrHelp) {
 		return 0
+	}
+	var usage usageError
+	if errors.As(err, &usage) {
+		hint := "lanscan --help"
+		if cmd != "discover" {
+			hint = "lanscan help " + cmd
+		}
+		fmt.Fprintf(stderr, "lanscan: %v\nRun '%s' for usage.\n", err, hint)
+		return 2
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "lanscan:", err)
@@ -62,8 +74,27 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return code
 }
 
-func usage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: lanscan discover [options] | resume --journal FILE | export [options] | merge [options] journals...\n\nDiscovery defaults to local-only collection. Use discover --help for options.")
+// runHelp prints the help for a command, or the main help.
+func runHelp(args []string, stdout, stderr io.Writer) int {
+	cmd := "discover"
+	if len(args) > 0 {
+		cmd = args[0]
+	}
+	switch cmd {
+	case "discover":
+		c := defaults()
+		discoverPage.write(stdout, discoverFlags(&c))
+	case "export":
+		exportPage.write(stdout, exportFlags(new(exportOptions)))
+	case "merge":
+		mergePage.write(stdout, mergeFlags(new(mergeOptions)))
+	case "resume":
+		resumePage.write(stdout, resumeFlags(new(resumeOptions)))
+	default:
+		fmt.Fprintf(stderr, "lanscan: no help for %q; commands are resume, export and merge\n", cmd)
+		return 2
+	}
+	return 0
 }
 
 // Config configures a discovery run. Start with DefaultConfig and set
@@ -95,7 +126,6 @@ type Config struct {
 	Format     string        `json:"format"`
 	Output     string        `json:"output"`
 	Journal    string        `json:"journal"`
-	NoJournal  bool          `json:"no_journal"`
 	Sync       string        `json:"sync"`
 	Limit      int           `json:"candidate_limit"`
 	DiskBudget int64         `json:"disk_budget"`
@@ -166,82 +196,112 @@ func (c Config) resolved() Config {
 // active reports whether c may send network traffic.
 func (c Config) active() bool { return c.Intensity > 0 && !c.Plan }
 
-// advancedFlags are listed separately in help; the preset sets them.
-var advancedFlags = map[string]bool{"rate": true, "concurrency": true, "max-operations": true, "timeout": true, "tcp-port": true, "dns-budget": true, "trace": true, "trace-hops": true, "trace-budget": true, "sample-per-prefix": true, "neighbours": true, "retry": true, "refresh-interval": true, "scope-from": true, "source": true, "interface": true, "realm": true, "vantage": true, "sync": true, "candidate-limit": true, "disk-budget": true, "require-capability": true, "config": true}
-
-func discoverFlags(c *config, stderr io.Writer) *flag.FlagSet {
-	fs := flag.NewFlagSet("discover", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.IntVar(&c.Intensity, "intensity", c.Intensity, "0 passive (default): local state only, no packets\n1 confirm addresses already in local evidence\n2 also sample known prefixes and trace a few paths\n3 also guess the first host of neighbouring prefixes")
-	fs.DurationVar(&c.Listen, "listen", c.Listen, "listen to broadcast/multicast traffic for this long first, e.g. 30s (Linux, needs CAP_NET_RAW)")
+func discoverFlags(c *config) *flag.FlagSet {
+	fs := flag.NewFlagSet("lanscan", flag.ContinueOnError)
+	fs.IntVar(&c.Intensity, "intensity", c.Intensity, "how much traffic to send:\n0  passive: read local state only, send nothing (default)\n1  confirm addresses the machine already knows\n2  also sample known subnets and trace a few paths\n3  also guess hosts in neighbouring subnets")
+	fs.DurationVar(&c.Listen, "listen", c.Listen, "first listen this long to broadcast/multicast traffic, e.g. 30s\n(Linux; needs root or CAP_NET_RAW; sends nothing)")
+	fs.BoolVar(&c.Plan, "plan", c.Plan, "show what the intensity would probe, then stop; sends nothing")
 	fs.BoolVar(&c.NoIPv6, "no-ipv6", c.NoIPv6, "no IPv6 probes, lookups or capture")
-	fs.BoolVar(&c.Plan, "plan", c.Plan, "show what the intensity would probe, without sending anything")
-	fs.Var((*stringsFlag)(&c.Include), "include", "probe only inside this CIDR; repeatable (default: private address space)")
-	fs.Var((*stringsFlag)(&c.Exclude), "exclude", "never probe inside this CIDR; repeatable, always wins")
-	fs.StringVar(&c.Seeds, "seeds", c.Seeds, "file with one IP or hostname per line")
-	fs.StringVar(&c.Inventory, "inventory", c.Inventory, "prefix inventory CSV")
-	fs.Var((*stringsFlag)(&c.DNSSuffix), "dns-suffix", "approved organisational DNS suffix; repeatable")
-	fs.StringVar(&c.Resolver, "resolver", c.Resolver, "explicit DNS server IP (default: system resolver policy)")
-	fs.StringVar(&c.Format, "format", c.Format, "text, jsonl, or csv")
-	fs.StringVar(&c.Output, "output", c.Output, "exclusive output file (default: stdout)")
-	fs.StringVar(&c.Journal, "journal", c.Journal, "exclusive JSONL journal path")
-	fs.BoolVar(&c.NoJournal, "no-journal", c.NoJournal, "stream only, without a recoverable journal")
-	fs.DurationVar(&c.Duration, "duration", c.Duration, "maximum run duration")
-
-	fs.Float64Var(&c.Rate, "rate", c.Rate, "maximum operation starts per second")
-	fs.IntVar(&c.Concurrency, "concurrency", c.Concurrency, "maximum concurrent validation jobs")
-	fs.IntVar(&c.MaxOperations, "max-operations", c.MaxOperations, "maximum operation reservations, including failed starts")
-	fs.DurationVar(&c.Timeout, "timeout", c.Timeout, "deadline per echo or TCP attempt")
-	fs.IntVar(&c.Port, "tcp-port", c.Port, "single fallback TCP service port; silence is inconclusive")
-	fs.IntVar(&c.DNSBudget, "dns-budget", c.DNSBudget, "maximum DNS exchanges; 0 disables DNS")
-	fs.IntVar(&c.Trace, "trace", c.Trace, "trace up to N selected destinations; 0 disables")
-	fs.IntVar(&c.TraceHops, "trace-hops", c.TraceHops, "maximum hop limit per trace")
-	fs.IntVar(&c.TraceBudget, "trace-budget", c.TraceBudget, "maximum trace hop operations")
-	fs.IntVar(&c.SamplePerPrefix, "sample-per-prefix", c.SamplePerPrefix, "synthetic IPv4 samples in known prefixes without host evidence (0-3)")
-	fs.IntVar(&c.Neighbours, "neighbours", c.Neighbours, "guess the first host of N sibling prefixes each side of known IPv4 prefixes (0-8)")
-	fs.IntVar(&c.Retry, "retry", c.Retry, "extra attempts for silent targets after all first attempts (0 or 1)")
-	fs.DurationVar(&c.Refresh, "refresh-interval", c.Refresh, "topology poll interval during active runs; change notifications apply as well; 0 disables")
-	fs.StringVar(&c.ScopeFrom, "scope-from", c.ScopeFrom, "routes: add private unicast routes of the current routing epoch to the scope")
-	fs.StringVar(&c.Source, "source", c.Source, "source IP address for validation")
-	fs.StringVar(&c.Interface, "interface", c.Interface, "restrict planned egress interface")
-	fs.StringVar(&c.Realm, "realm", c.Realm, "network realm (default: unique to this run)")
-	fs.StringVar(&c.Vantage, "vantage", c.Vantage, "observation point (default: host name)")
-	fs.StringVar(&c.Sync, "sync", c.Sync, "periodic or every-event journal sync")
-	fs.IntVar(&c.Limit, "candidate-limit", c.Limit, "maximum retained findings and candidates")
-	fs.Int64Var(&c.DiskBudget, "disk-budget", c.DiskBudget, "maximum journal bytes")
-	fs.Var((*stringsFlag)(&c.Require), "require-capability", "collector or capability that must be available; repeatable")
-	fs.String("config", "", "JSON configuration file (durations in nanoseconds)")
-	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), "Usage: lanscan discover [--intensity 0-3] [--listen 30s] [options]\n\nOptions:\n")
-		printFlags(fs, false)
-		fmt.Fprint(fs.Output(), "\nAdvanced (intensity presets set the probing options; explicit values win):\n")
-		printFlags(fs, true)
-	}
+	fs.DurationVar(&c.Duration, "duration", c.Duration, "stop after this long")
+	fs.Var((*stringsFlag)(&c.Include), "include", "probe only inside this `CIDR`; repeatable (default: private address space)")
+	fs.Var((*stringsFlag)(&c.Exclude), "exclude", "never probe inside this `CIDR`; repeatable, always wins")
+	fs.StringVar(&c.Interface, "interface", c.Interface, "use only this network `INTERFACE`")
+	fs.StringVar(&c.Source, "source", c.Source, "send from this source `IP`")
+	fs.StringVar(&c.ScopeFrom, "scope-from", c.ScopeFrom, "also allow private routes of the current routing table (`routes` is the only value)")
+	fs.StringVar(&c.Seeds, "seeds", c.Seeds, "extra addresses or hostnames to check, one per line in `FILE`")
+	fs.StringVar(&c.Inventory, "inventory", c.Inventory, "known prefixes from a `CSV` with columns realm,prefix,kind,source,observed_at")
+	fs.Var((*stringsFlag)(&c.DNSSuffix), "dns-suffix", "only query names under this `DOMAIN`; repeatable")
+	fs.StringVar(&c.Resolver, "resolver", c.Resolver, "query this DNS server `IP` instead of the system resolver")
+	fs.String("config", "", "read settings from this JSON `FILE`; flags override it")
+	fs.StringVar(&c.Format, "format", c.Format, "results `FORMAT`: text, jsonl or csv")
+	fs.StringVar(&c.Output, "output", c.Output, "write results to this new `FILE` instead of stdout")
+	fs.StringVar(&c.Journal, "journal", c.Journal, "also keep a recoverable event journal in this new `FILE` (needed for resume)")
+	fs.StringVar(&c.Sync, "sync", c.Sync, "journal durability `MODE`: periodic or every-event")
+	fs.StringVar(&c.Realm, "realm", c.Realm, "network `NAME` recorded with results (default: unique per run)")
+	fs.StringVar(&c.Vantage, "vantage", c.Vantage, "observation point `NAME` (default: host name)")
+	fs.IntVar(&c.MaxOperations, "max-operations", c.MaxOperations, "hard cap on network operations")
+	fs.IntVar(&c.Limit, "candidate-limit", c.Limit, "maximum retained hosts, and separately prefixes")
+	fs.Int64Var(&c.DiskBudget, "disk-budget", c.DiskBudget, "maximum journal size in `BYTES`")
+	fs.Var((*stringsFlag)(&c.Require), "require-capability", "exit 3 unless this collector or capability `NAME` works; repeatable")
+	fs.Float64Var(&c.Rate, "rate", c.Rate, "operations started per second")
+	fs.IntVar(&c.Concurrency, "concurrency", c.Concurrency, "operations in flight")
+	fs.DurationVar(&c.Timeout, "timeout", c.Timeout, "wait per echo or TCP attempt")
+	fs.IntVar(&c.Port, "tcp-port", c.Port, "TCP `PORT` tried when echo gets no answer")
+	fs.IntVar(&c.DNSBudget, "dns-budget", c.DNSBudget, "maximum DNS queries; 0 disables DNS")
+	fs.IntVar(&c.Trace, "trace", c.Trace, "trace paths to up to `N` responders")
+	fs.IntVar(&c.TraceHops, "trace-hops", c.TraceHops, "maximum hops per trace")
+	fs.IntVar(&c.TraceBudget, "trace-budget", c.TraceBudget, "maximum trace probes in total")
+	fs.IntVar(&c.SamplePerPrefix, "sample-per-prefix", c.SamplePerPrefix, "addresses guessed in each known IPv4 subnet without hosts, up to 3")
+	fs.IntVar(&c.Neighbours, "neighbours", c.Neighbours, "neighbouring subnets guessed on each side of known IPv4 subnets, up to 8")
+	fs.IntVar(&c.Retry, "retry", c.Retry, "extra attempts for silent targets, at most 1")
+	fs.DurationVar(&c.Refresh, "refresh-interval", c.Refresh, "how often to poll for route changes; 0 disables")
+	alias(fs)
 	return fs
 }
 
-// simpleFlags lists the everyday options first, in this order.
-var simpleFlags = []string{"intensity", "listen", "plan", "include", "exclude", "no-ipv6", "seeds", "inventory", "dns-suffix", "resolver", "format", "output", "journal", "no-journal", "duration"}
+// tuningNotes show each tuning flag's value at intensities 1, 2 and 3.
+func tuningNotes() map[string]string {
+	notes := map[string]string{}
+	for name, get := range map[string]func(Tuning) string{
+		"rate":              func(t Tuning) string { return fmt.Sprint(t.Rate) },
+		"concurrency":       func(t Tuning) string { return fmt.Sprint(t.Concurrency) },
+		"max-operations":    func(t Tuning) string { return fmt.Sprint(t.MaxOperations) },
+		"timeout":           func(t Tuning) string { return t.Timeout.String() },
+		"tcp-port":          func(t Tuning) string { return fmt.Sprint(t.Port) },
+		"dns-budget":        func(t Tuning) string { return fmt.Sprint(t.DNSBudget) },
+		"trace":             func(t Tuning) string { return fmt.Sprint(t.Trace) },
+		"trace-hops":        func(t Tuning) string { return fmt.Sprint(t.TraceHops) },
+		"trace-budget":      func(t Tuning) string { return fmt.Sprint(t.TraceBudget) },
+		"sample-per-prefix": func(t Tuning) string { return fmt.Sprint(t.SamplePerPrefix) },
+		"neighbours":        func(t Tuning) string { return fmt.Sprint(t.Neighbours) },
+		"retry":             func(t Tuning) string { return fmt.Sprint(t.Retry) },
+		"refresh-interval":  func(t Tuning) string { return t.Refresh.String() },
+	} {
+		notes[name] = fmt.Sprintf("intensity 1/2/3: %s/%s/%s", get(presets[1]), get(presets[2]), get(presets[3]))
+	}
+	notes["disk-budget"] = "default 256 MiB"
+	return notes
+}
 
-func printFlags(fs *flag.FlagSet, advanced bool) {
-	w := fs.Output()
-	show := func(f *flag.Flag) {
-		fmt.Fprintf(w, "  --%s\n", f.Name)
-		for _, line := range strings.Split(f.Usage, "\n") {
-			fmt.Fprintf(w, "        %s\n", line)
-		}
-	}
-	if !advanced {
-		for _, name := range simpleFlags {
-			show(fs.Lookup(name))
-		}
-		return
-	}
-	fs.VisitAll(func(f *flag.Flag) {
-		if advancedFlags[f.Name] {
-			show(f)
-		}
-	})
+var discoverPage = helpPage{
+	about: `lanscan finds the subnets and hosts this machine can reach. It starts from
+what the machine already knows (interfaces, routes, neighbours, DNS) and sends
+traffic only when you raise --intensity. It never sweeps address ranges.`,
+	usage: []string{
+		"lanscan [flags]                     discover (the default command)",
+		"lanscan resume|export|merge [flags] work with saved journals",
+		"lanscan help [command] | version",
+	},
+	examples: [][2]string{
+		{"lanscan", "passive: local state only, sends nothing"},
+		{"lanscan -i 1", "also confirm known addresses (a handful of packets)"},
+		{"lanscan -i 2 --listen 30s", "listen first, then sample known subnets"},
+		{"lanscan -i 3 --plan", "show what intensity 3 would probe; sends nothing"},
+		{"lanscan -i 2 -f csv -o hosts.csv", "write findings to a CSV file"},
+		{"lanscan -i 2 --include 10.20.0.0/16", "probe only inside one range"},
+	},
+	template: []string{
+		"lanscan -i <0-3> [--listen <30s>]",
+		"        [--include <CIDR>]... [--exclude <CIDR>]... [--seeds <hosts.txt>]",
+		"        [-f text|jsonl|csv] [-o <results-file>] [-j <journal.jsonl>]",
+	},
+	sections: []helpSection{
+		{"SCAN", []string{"intensity", "listen", "plan", "no-ipv6", "duration"}},
+		{"SCOPE", []string{"include", "exclude", "interface", "source", "scope-from"}},
+		{"INPUT", []string{"seeds", "inventory", "dns-suffix", "resolver", "config"}},
+		{"OUTPUT", []string{"format", "output", "journal", "sync", "realm", "vantage"}},
+		{"LIMITS", []string{"max-operations", "candidate-limit", "disk-budget", "require-capability"}},
+		{"TUNING (set by --intensity; a flag here overrides the preset)", []string{"rate", "concurrency", "timeout", "tcp-port", "dns-budget", "trace", "trace-hops", "trace-budget", "sample-per-prefix", "neighbours", "retry", "refresh-interval"}},
+	},
+	footer: `COMMANDS:
+  resume   continue an interrupted run from its journal
+  export   rewrite a journal as events or latest findings
+  merge    combine journals from several machines
+Run 'lanscan help <command>' for a command's flags.
+
+Exit status: 0 complete, 1 error, 2 usage error, 3 incomplete (budget,
+duration or a required capability), 130 interrupted.`,
+	notes: tuningNotes(),
 }
 
 // loadConfigFile decodes any --config file in args over c.
@@ -280,13 +340,13 @@ func loadConfigFile(args []string, c *config) error {
 
 // parseConfig layers the intensity preset, then any JSON configuration, then
 // flags, so explicit values always override the preset.
-func parseConfig(args []string, stderr io.Writer) (config, error) {
+func parseConfig(args []string, stdout io.Writer) (config, error) {
 	// The first pass only learns the final intensity.
 	probe := defaults()
 	if err := loadConfigFile(args, &probe); err != nil {
 		return probe, err
 	}
-	if err := discoverFlags(&probe, stderr).Parse(args); err != nil {
+	if err := parseFlags(discoverFlags(&probe), args, stdout, discoverPage); err != nil {
 		return probe, err
 	}
 	c := defaults()
@@ -306,17 +366,20 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 			}
 		}
 	}
-	fs := discoverFlags(&c, io.Discard)
-	if err := fs.Parse(args); err != nil {
+	fs := discoverFlags(&c)
+	if err := parseFlags(fs, args, io.Discard, discoverPage); err != nil {
 		return c, err
 	}
 	if fs.NArg() != 0 {
-		return c, errors.New("unexpected positional arguments")
+		return c, usageError{fmt.Errorf("unexpected argument %q", fs.Arg(0))}
 	}
 	if c.Intensity == 0 && c.Tuning != (Tuning{}) {
-		return c, errors.New("probing options need --intensity 1 or higher")
+		return c, usageError{errors.New("tuning flags need --intensity 1 or higher")}
 	}
-	return c, validateConfig(c)
+	if err := validateConfig(c); err != nil {
+		return c, usageError{err}
+	}
+	return c, nil
 }
 
 func validateConfig(c config) error {
@@ -328,9 +391,6 @@ func validateConfig(c config) error {
 	}
 	if c.Sync != "periodic" && c.Sync != "every-event" {
 		return errors.New("sync must be periodic or every-event")
-	}
-	if c.NoJournal && c.Journal != "" {
-		return errors.New("--no-journal and --journal are mutually exclusive")
 	}
 	if c.ScopeFrom != "" && c.ScopeFrom != "routes" {
 		return errors.New("scope-from must be routes")

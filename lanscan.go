@@ -15,7 +15,7 @@ import (
 // passive), and optionally override Tuning fields, e.g. starting from
 // Preset(cfg.Intensity). A zero Tuning uses the intensity's preset.
 // Include/Exclude contain CIDRs; Seeds and Inventory are input file paths.
-// Output is CLI-only. Journal is optional; set NoJournal=false to enable it.
+// Output is CLI-only. Set Journal to a new file path for a recoverable journal.
 // Format controls journal configuration metadata; events are always typed.
 type Config = app.Config
 
@@ -50,12 +50,10 @@ type Result struct {
 	Finished *Event
 }
 
-// DefaultConfig returns passive defaults with journaling disabled. Each caller
+// DefaultConfig returns passive defaults without a journal. Each caller
 // owns its configuration; do not modify it while Discover is running.
 func DefaultConfig() Config {
-	c := app.DefaultConfig()
-	c.NoJournal = true
-	return c
+	return app.DefaultConfig()
 }
 
 // Discover runs the same pipeline as the CLI without invoking a subprocess,

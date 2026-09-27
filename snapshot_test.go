@@ -63,7 +63,6 @@ func sampleEvents(t testing.TB) []model.Event {
 	}
 	events := []model.Event{crafted, {SchemaVersion: 1, EventID: "r:2", RunID: "r", Seq: 2, Type: "x", RealmID: "realm", VantageID: "v", RecordedAt: time.Now().UTC(), Details: map[string]any{}}}
 	cfg := app.DefaultConfig()
-	cfg.NoJournal = true
 	cfg.Include = []string{"10.0.0.0/8"}
 	if _, err := app.Discover(context.Background(), cfg, func(e model.Event) error {
 		events = append(events, e)

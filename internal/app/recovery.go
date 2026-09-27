@@ -250,31 +250,58 @@ func (r *recoveryState) consumed() time.Duration {
 	return r.elapsed
 }
 
-func runResume(parent context.Context, args []string, stdout, stderr io.Writer) (code int, retErr error) {
+type resumeOptions struct {
+	path, format, output string
+	addOperations        int
+	addDuration          time.Duration
+	diskBudget           int64
+}
+
+func resumeFlags(o *resumeOptions) *flag.FlagSet {
 	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	path := fs.String("journal", "", "journal to validate and resume")
-	format := fs.String("format", "", "output format for this segment (default: original format)")
-	outputPath := fs.String("output", "", "new exclusive output file (default: stdout)")
-	addOperations := fs.Int("extend-operations", 0, "explicitly add to the cumulative operation budget")
-	addDuration := fs.Duration("extend-duration", 0, "explicitly add to the cumulative active-runtime budget")
-	diskBudget := fs.Int64("disk-budget", 0, "explicitly increase maximum journal bytes")
-	if err := fs.Parse(args); err != nil {
+	fs.StringVar(&o.path, "journal", "", "journal `FILE` of the interrupted run")
+	fs.StringVar(&o.format, "format", "", "output format for this segment (default: the run's format)")
+	fs.StringVar(&o.output, "output", "", "write this segment to a new `FILE` instead of stdout")
+	fs.IntVar(&o.addOperations, "extend-operations", 0, "add `N` to the run's operation budget")
+	fs.DurationVar(&o.addDuration, "extend-duration", 0, "add this much to the run's time budget")
+	fs.Int64Var(&o.diskBudget, "disk-budget", 0, "raise the journal size limit to this many `bytes`")
+	alias(fs)
+	return fs
+}
+
+var resumePage = helpPage{
+	about: "lanscan resume continues an interrupted run from its journal, re-checking\nthe network first. The run's scope and settings cannot change; budgets can grow.",
+	usage: []string{"lanscan resume -j <journal.jsonl> [--extend-operations <N>] [--extend-duration <10m>]"},
+	examples: [][2]string{
+		{"lanscan resume -j scan.jsonl", "pick up where the run stopped"},
+		{"lanscan resume -j scan.jsonl --extend-duration 5m", "and allow five more minutes"},
+	},
+	sections: []helpSection{{"FLAGS", []string{"journal", "format", "output", "extend-operations", "extend-duration", "disk-budget"}}},
+}
+
+func runResume(parent context.Context, args []string, stdout, stderr io.Writer) (code int, retErr error) {
+	var o resumeOptions
+	fs := resumeFlags(&o)
+	if err := parseFlags(fs, args, stdout, resumePage); err != nil {
 		return 2, err
 	}
-	if fs.NArg() != 0 || *path == "" || *addOperations < 0 || *addDuration < 0 || *diskBudget < 0 {
-		return 2, errors.New("--journal required; extensions must be nonnegative")
+	path, format, outputPath, addOperations, addDuration, diskBudget := &o.path, &o.format, &o.output, &o.addOperations, &o.addDuration, &o.diskBudget
+	if *path == "" {
+		return 2, usageError{errors.New("--journal is required")}
+	}
+	if fs.NArg() != 0 {
+		return 2, usageError{fmt.Errorf("unexpected argument %q", fs.Arg(0))}
+	}
+	if *addOperations < 0 || *addDuration < 0 || *diskBudget < 0 {
+		return 2, usageError{errors.New("extensions must be nonnegative")}
 	}
 	if *format != "" && *format != "jsonl" && *format != "csv" && *format != "text" {
-		return 2, errors.New("unknown output format")
+		return 2, usageError{errors.New("--format must be text, jsonl or csv")}
 	}
 	state := newRecovery()
 	var updated config
 	// No repair or append occurs until all immutable settings and snapshots pass.
 	j, result, err := journal.OpenResume(*path, journal.Options{}, state.replay, func(result journal.ReplayResult) error {
-		if state.config.NoJournal {
-			return errors.New("stream-only runs cannot be resumed")
-		}
 		if state.finished && state.outcome == "completed" {
 			return errors.New("run already completed; start a new discover run")
 		}

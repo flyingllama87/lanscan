@@ -9,12 +9,13 @@ This project is under active implementation. It reports configured and routed pr
 ```sh
 go build -o lanscan ./cmd/lanscan
 
-./lanscan discover                  # passive: local state only, sends nothing
-./lanscan discover --intensity 1    # also confirm addresses already in local evidence
-./lanscan discover --intensity 2    # also sample known prefixes and trace a few paths
-./lanscan discover --intensity 3    # also guess neighbouring prefixes
-./lanscan discover --intensity 2 --plan   # show what it would probe; sends nothing
-./lanscan discover --listen 30s     # first listen to the local segments (Linux)
+./lanscan                    # passive: local state only, sends nothing
+./lanscan -i 1               # also confirm addresses already in local evidence
+./lanscan -i 2               # also sample known prefixes and trace a few paths
+./lanscan -i 3               # also guess neighbouring prefixes
+./lanscan -i 2 --plan        # show what it would probe; sends nothing
+./lanscan --listen 30s       # first listen to the local segments (Linux)
+./lanscan --help             # every flag, grouped, with examples
 
 # Recover complete records and materialize the latest findings offline.
 ./lanscan export --journal scan.jsonl --view latest --format csv
@@ -36,11 +37,11 @@ No intensity sweeps prefixes or scans ports: every target is an evidenced addres
 
 `--listen DURATION` (Linux) first listens to broadcast and multicast traffic on every up, non-loopback interface (or `--interface`), then continues at the chosen intensity; heard prefixes are sampled at intensity 2 and above like any other known prefix. It records senders and what their frames claim: ARP (including hosts in subnets this machine has no address in), DHCP (leases with masks, gateways, DNS servers, relays, classless routes), IPv6 router advertisements (prefixes, routes, DNS servers), OSPF hellos (interface prefixes), RIPv2 routes, VRRP/HSRP virtual gateways, LLDP/CDP neighbours (name, port, VLAN, management address) and mDNS/SSDP/LLMNR/NetBIOS senders. It uses an AF_PACKET socket with a kernel filter that admits only received broadcast, multicast and ARP frames, and sets the interfaces to accept all multicast for its duration; it never transmits. It needs CAP_NET_RAW (`sudo setcap cap_net_raw+ep lanscan`, or root); without it, or on Windows, `--listen` fails before creating any file.
 
-Every preset setting has an advanced flag (`--rate`, `--trace`, `--sample-per-prefix`, `--neighbours`, `--retry`, `--tcp-port` and others; see `lanscan discover --help`); explicit flags and `--config` values override the preset, and the journal records the resolved values. Library callers set `Config.Intensity` and optionally `Config.Tuning`, starting from `lanscan.Preset(n)`.
+Every preset setting has an advanced flag (`--rate`, `--trace`, `--sample-per-prefix`, `--neighbours`, `--retry`, `--tcp-port` and others; see `lanscan --help`); explicit flags and `--config` values override the preset, and the journal records the resolved values. Library callers set `Config.Intensity` and optionally `Config.Tuning`, starting from `lanscan.Preset(n)`.
 
 ```sh
 # Seeds, approved DNS suffixes and a narrower scope.
-./lanscan discover --intensity 2 --include 10.20.0.0/16 --exclude 10.20.50.0/24 \
+./lanscan --intensity 2 --include 10.20.0.0/16 --exclude 10.20.50.0/24 \
   --seeds hosts.txt --dns-suffix corp.example --journal scan.jsonl --format csv --output findings.csv
 ```
 
@@ -48,7 +49,7 @@ Every preset setting has an advanced flag (`--rate`, `--trace`, `--sample-per-pr
 
 Active validation uses ICMP echo, then one TCP connect on `--tcp-port` if echo is inconclusive. Linux uses a ping socket or raw socket with correlated ICMP errors; Windows uses the native ICMP APIs. Neither sends application payloads. Traces send hop-limited echoes to selected responders; on Linux each trace keeps one ICMP identifier and checksum (Paris-style), so per-flow ECMP keeps it on one path. DNS and trace together may use at most half of the remaining operation budget. Operations are bounded, but OS-managed retransmissions and neighbor resolution mean operation counts are not packet counts. Unknown or silent targets are not declared unused. During active runs, interface, address, route and rule changes start a new routing epoch. They are detected by rtnetlink or IP Helper notifications, with polling as the fallback; resolver configuration changes are recorded too.
 
-JSONL contains all events; CSV/text stream findings as they change. `run_finished` carries coverage counts relative to known prefixes and planned candidates. Journal and output files are created exclusively and never silently overwritten. `--no-journal` opts out of recoverable local storage. `--sync every-event` requests stronger file durability at additional I/O cost. Progress and errors go to stderr. After an interrupt, the process drains for at most five seconds.
+JSONL contains all events; CSV/text stream findings as they change. `run_finished` carries coverage counts relative to known prefixes and planned candidates. Journal and output files are created exclusively and never silently overwritten. A recoverable journal is kept only with `--journal FILE` (`-j`); `resume` needs one. `--sync every-event` requests stronger file durability at additional I/O cost. Progress and errors go to stderr. After an interrupt, the process drains for at most five seconds.
 
 Go 1.27 is the current build environment. Run `make check` (vet, gofmt, staticcheck and race tests for Linux and Windows). Unit tests exercise loopback echo/TCP and injected probes only; they do not scan the host's LAN. `make lab` (`scripts/netns-lab.sh`, needs `tcpdump`) builds routed topologies in unprivileged Linux user and network namespaces and runs the real binary end to end, including wire captures, the 100-prefix acceptance estate and fault injection. Windows native tests run only on Windows (see `.github/workflows/ci.yml`); a cross-build does not validate native APIs at runtime.
 
